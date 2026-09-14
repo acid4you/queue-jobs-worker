@@ -41,11 +41,8 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# Lock files (keep only the one you use)
-# Uncomment the ones you DON'T use:
-# package-lock.json
-# yarn.lock
-# pnpm-lock.yaml
+# Lock file
+pnpm-lock.yaml
 
 # Temporary files
 tmp/
