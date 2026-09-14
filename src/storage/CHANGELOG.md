@@ -4,6 +4,16 @@ Changes to the storage module: `StorageAdapter` interface and all adapter implem
 
 ---
 
+## [1.0.5] — 2026-09-15
+
+### Added
+
+- **Consistent timestamps across Lua scripts**
+  - Changed `RedisStorageAdapter` to use `now_iso` from `ARGV[3]` for `updatedAt` in `CLAIM_LUA` and `RECOVER_STALLED_LUA`.
+  - Previously, `updatedAt` was sometimes derived from `lockExpiresAt`, which could differ from the actual time of the operation.
+
+---
+
 ## [1.0.2] — 2026-09-05
 
 ### Fixed

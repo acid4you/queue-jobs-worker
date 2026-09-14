@@ -13,7 +13,10 @@
 #   1. Reads the LATEST version block from each sub-module changelog:
 #        src/core/CHANGELOG.md
 #        src/events/CHANGELOG.md
+#        src/lib/CHANGELOG.md
 #        src/storage/CHANGELOG.md
+#        src/types/CHANGELOG.md
+#        tests/CHANGELOG.md
 #   2. Assembles them into one new section.
 #   3. Prepends that section to the root CHANGELOG.md.
 #   4. Appends a reference link for the new version at the bottom of
@@ -63,9 +66,12 @@ fi
 ROOT_CHANGELOG="CHANGELOG.md"
 CORE_CHANGELOG="src/core/CHANGELOG.md"
 EVENTS_CHANGELOG="src/events/CHANGELOG.md"
+LIB_CHANGELOG="src/lib/CHANGELOG.md"
 STORAGE_CHANGELOG="src/storage/CHANGELOG.md"
+TYPES_CHANGELOG="src/types/CHANGELOG.md"
+TESTS_CHANGELOG="tests/CHANGELOG.md"
 
-for f in "$CORE_CHANGELOG" "$EVENTS_CHANGELOG" "$STORAGE_CHANGELOG"; do
+for f in "$CORE_CHANGELOG" "$EVENTS_CHANGELOG" "$LIB_CHANGELOG" "$STORAGE_CHANGELOG" "$TYPES_CHANGELOG" "$TESTS_CHANGELOG"; do
   if [[ ! -f "$f" ]]; then
     echo "Error: $f not found. Run this script from the project root."
     exit 1
@@ -78,7 +84,10 @@ REPO_URL="https://github.com/rafidahmed870/queue-jobs-worker"
 
 CORE_BODY=$(extract_latest_block "$CORE_CHANGELOG" | trim_blank_lines)
 EVENTS_BODY=$(extract_latest_block "$EVENTS_CHANGELOG" | trim_blank_lines)
+LIB_BODY=$(extract_latest_block "$LIB_CHANGELOG" | trim_blank_lines)
 STORAGE_BODY=$(extract_latest_block "$STORAGE_CHANGELOG" | trim_blank_lines)
+TYPES_BODY=$(extract_latest_block "$TYPES_CHANGELOG" | trim_blank_lines)
+TESTS_BODY=$(extract_latest_block "$TESTS_CHANGELOG" | trim_blank_lines)
 
 # Build the new root entry.
 NEW_ENTRY="## [$VERSION] — $DATE
@@ -91,9 +100,21 @@ $CORE_BODY
 
 $EVENTS_BODY
 
+### Lib
+
+$LIB_BODY
+
 ### Storage
 
-$STORAGE_BODY"
+$STORAGE_BODY
+
+### Types
+
+$TYPES_BODY
+
+### Tests
+
+$TESTS_BODY"
 
 # ── update root CHANGELOG.md ──────────────────────────────────────────────────
 
@@ -148,4 +169,7 @@ echo "✓ CHANGELOG.md updated with version $VERSION ($DATE)"
 echo "  Sources merged:"
 echo "    • $CORE_CHANGELOG"
 echo "    • $EVENTS_CHANGELOG"
+echo "    • $LIB_CHANGELOG"
 echo "    • $STORAGE_CHANGELOG"
+echo "    • $TYPES_CHANGELOG"
+echo "    • $TESTS_CHANGELOG"
