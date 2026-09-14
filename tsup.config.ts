@@ -10,4 +10,6 @@ export default defineConfig({
   treeshake: true,
   outDir: "dist",
   target: "node18",
+  loader: { ".lua": "text" }, // embed Lua scripts as inline strings in the bundle
 });
+
