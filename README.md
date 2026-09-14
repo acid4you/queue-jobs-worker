@@ -6,13 +6,16 @@ A durable, TypeScript-first job queue for Node.js built for asynchronous work, r
 
 <p align="center">
   <a href="https://www.npmjs.com/package/queue-jobs-worker">
-    <img src="https://img.shields.io/npm/v/queue-jobs-worker.svg" alt="npm version">
+    <img src="https://img.shields.io/npm/dm/queue-jobs-worker.svg?label=npm%20downloads" alt="npm downloads">
+  </a>&nbsp;
+  <a href="https://www.npmjs.com/package/queue-jobs-worker">
+    <img src="https://img.shields.io/npm/v/queue-jobs-worker.svg?label=npm%20version" alt="npm version">
   </a>&nbsp;
   <a href="./LICENSE">
     <img src="https://img.shields.io/npm/l/queue-jobs-worker.svg" alt="license">
   </a>&nbsp;
   <a href="https://nodejs.org">
-    <img src="https://img.shields.io/node/v/queue-jobs-worker.svg" alt="node">
+    <img src="https://img.shields.io/node/v/queue-jobs-worker.svg" alt="node version">
   </a>
 </p>
 
@@ -31,7 +34,7 @@ It supports all major local and production-friendly backends:
 
 For a detailed feature breakdown, see [FEATURES.md](./FEATURES.md).
 
----
+<img src="./assets/queue-jobs-worker-demo.gif" alt="demo" />
 
 ## Installation
 
@@ -114,26 +117,26 @@ const client = new QueueClient({
 await client.init();
 ```
 
-| Dialect | Connection Format | `client.init()` Behavior |
-|---|---|---|
-| `memory` | N/A | No-op (transient memory store) |
-| `redis` | `redis://...`, `rediss://...` (TLS), Auth URL | Connects & verifies with `PING` |
-| `postgres` | `postgresql://user:pass@host:5432/dbname` | `SELECT 1` check & creates schema |
-| `mysql` | `mysql://user:pass@host:3306/dbname` | Connection check & creates schema |
+| Dialect    | Connection Format                             | `client.init()` Behavior          |
+| ---------- | --------------------------------------------- | --------------------------------- |
+| `memory`   | N/A                                           | No-op (transient memory store)    |
+| `redis`    | `redis://...`, `rediss://...` (TLS), Auth URL | Connects & verifies with `PING`   |
+| `postgres` | `postgresql://user:pass@host:5432/dbname`     | `SELECT 1` check & creates schema |
+| `mysql`    | `mysql://user:pass@host:3306/dbname`          | Connection check & creates schema |
 
 ---
 
 ## Core Concepts
 
-| Concept | Description |
-|---|---|
-| `QueueClient` | Entry point that owns configuration, storage, and queues |
-| `Queue` | A separate job stream with its own settings |
-| `Job` | A unit of work passed to your processor |
-| `Worker` | Claims and executes jobs |
-| `Processor` | Your async function, e.g. `async (job) => { ... }` |
-| `StorageAdapter` | A backend abstraction for durable storage |
-| `DLQ` | Dead Letter Queue for permanently failed jobs |
+| Concept          | Description                                              |
+| ---------------- | -------------------------------------------------------- |
+| `QueueClient`    | Entry point that owns configuration, storage, and queues |
+| `Queue`          | A separate job stream with its own settings              |
+| `Job`            | A unit of work passed to your processor                  |
+| `Worker`         | Claims and executes jobs                                 |
+| `Processor`      | Your async function, e.g. `async (job) => { ... }`       |
+| `StorageAdapter` | A backend abstraction for durable storage                |
+| `DLQ`            | Dead Letter Queue for permanently failed jobs            |
 
 ---
 
@@ -180,13 +183,17 @@ const queue = client.createQueue("notifications");
 
 await queue.enqueue("send-push", { userId: "u_123" });
 
-await queue.enqueue("send-push", { userId: "u_123" }, {
-  attempts: 5,
-  retryDelay: 2000,
-  backoff: "linear",
-  timeout: 10_000,
-  priority: 10,
-});
+await queue.enqueue(
+  "send-push",
+  { userId: "u_123" },
+  {
+    attempts: 5,
+    retryDelay: 2000,
+    backoff: "linear",
+    timeout: 10_000,
+    priority: 10,
+  },
+);
 ```
 
 If you want TypeScript type safety for `job.data`, pass a generic when creating the queue, such as `client.createQueue<{ userId: string }>("notifications")`.
@@ -386,19 +393,45 @@ You can provide a custom backend by implementing the `StorageAdapter` interface.
 const { QueueClient } = require("queue-jobs-worker");
 
 class MongoStorageAdapter {
-  async initialize() { /* connect, create indexes */ }
-  async close() { /* disconnect */ }
-  async enqueue(input) { /* ... */ }
-  async claim(input) { /* atomic claim */ }
-  async complete(jobId) { /* ... */ }
-  async requeue(input) { /* ... */ }
-  async moveToDlq(input) { /* ... */ }
-  async releaseLock(jobId) { /* ... */ }
-  async recoverStalledJobs(queue, now) { /* ... */ }
-  async getJob(jobId) { /* ... */ }
-  async getJobs(filter) { /* ... */ }
-  async getJobCounts(queue) { /* ... */ }
-  async checkAndIncrementRateLimit(queue, max, windowMs, now) { /* ... */ }
+  async initialize() {
+    /* connect, create indexes */
+  }
+  async close() {
+    /* disconnect */
+  }
+  async enqueue(input) {
+    /* ... */
+  }
+  async claim(input) {
+    /* atomic claim */
+  }
+  async complete(jobId) {
+    /* ... */
+  }
+  async requeue(input) {
+    /* ... */
+  }
+  async moveToDlq(input) {
+    /* ... */
+  }
+  async releaseLock(jobId) {
+    /* ... */
+  }
+  async recoverStalledJobs(queue, now) {
+    /* ... */
+  }
+  async getJob(jobId) {
+    /* ... */
+  }
+  async getJobs(filter) {
+    /* ... */
+  }
+  async getJobCounts(queue) {
+    /* ... */
+  }
+  async checkAndIncrementRateLimit(queue, max, windowMs, now) {
+    /* ... */
+  }
 }
 
 const client = QueueClient.withAdapter(new MongoStorageAdapter(), {
@@ -414,19 +447,19 @@ await client.init();
 
 ### `new QueueClient(options?)`
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `dialect` | `"memory" \| "redis" \| "postgres" \| "mysql"` | `"memory"` | Storage backend |
-| `connectionString` | `string` | — | Required for Redis/PostgreSQL/MySQL |
-| `defaults.attempts` | `number` | `3` | Max retries per job |
-| `defaults.retryDelay` | `number` | `1000` | Base retry delay in ms |
-| `defaults.backoff` | `"fixed" \| "linear" \| "exponential"` | `"exponential"` | Retry strategy |
-| `defaults.timeout` | `number` | `30000` | Per-attempt timeout in ms |
-| `defaults.concurrency` | `number` | `10` | Default worker concurrency |
-| `defaults.pollInterval` | `number` | `1000` | Poll interval in ms |
-| `defaults.stalledInterval` | `number` | `30000` | Stalled-job check interval in ms |
-| `defaults.lockDuration` | `number` | `60000` | Lock TTL in ms |
-| `defaults.rateLimit` | `{ max, duration }` | — | Optional rate limiting |
+| Option                     | Type                                           | Default         | Description                         |
+| -------------------------- | ---------------------------------------------- | --------------- | ----------------------------------- |
+| `dialect`                  | `"memory" \| "redis" \| "postgres" \| "mysql"` | `"memory"`      | Storage backend                     |
+| `connectionString`         | `string`                                       | —               | Required for Redis/PostgreSQL/MySQL |
+| `defaults.attempts`        | `number`                                       | `3`             | Max retries per job                 |
+| `defaults.retryDelay`      | `number`                                       | `1000`          | Base retry delay in ms              |
+| `defaults.backoff`         | `"fixed" \| "linear" \| "exponential"`         | `"exponential"` | Retry strategy                      |
+| `defaults.timeout`         | `number`                                       | `30000`         | Per-attempt timeout in ms           |
+| `defaults.concurrency`     | `number`                                       | `10`            | Default worker concurrency          |
+| `defaults.pollInterval`    | `number`                                       | `1000`          | Poll interval in ms                 |
+| `defaults.stalledInterval` | `number`                                       | `30000`         | Stalled-job check interval in ms    |
+| `defaults.lockDuration`    | `number`                                       | `60000`         | Lock TTL in ms                      |
+| `defaults.rateLimit`       | `{ max, duration }`                            | —               | Optional rate limiting              |
 
 ### `client.init()`
 
@@ -454,16 +487,16 @@ Creates a client using a custom storage backend.
 
 ### `queue.enqueue(type, payload, options?)`
 
-| Option | Type | Description |
-|---|---|---|
-| `attempts` | `number` | Maximum attempts for this job |
-| `retryDelay` | `number` | Base retry delay in ms |
-| `backoff` | `string` | Retry backoff strategy |
-| `timeout` | `number` | Per-attempt timeout in ms |
-| `priority` | `number` | Higher values are processed first |
-| `schedule.delay` | `number` | Delay before the job becomes eligible |
-| `schedule.runAt` | `string \| number` | Absolute run time |
-| `schedule.cron` | `string` | Cron expression for recurring jobs |
+| Option           | Type               | Description                           |
+| ---------------- | ------------------ | ------------------------------------- |
+| `attempts`       | `number`           | Maximum attempts for this job         |
+| `retryDelay`     | `number`           | Base retry delay in ms                |
+| `backoff`        | `string`           | Retry backoff strategy                |
+| `timeout`        | `number`           | Per-attempt timeout in ms             |
+| `priority`       | `number`           | Higher values are processed first     |
+| `schedule.delay` | `number`           | Delay before the job becomes eligible |
+| `schedule.runAt` | `string \| number` | Absolute run time                     |
+| `schedule.cron`  | `string`           | Cron expression for recurring jobs    |
 
 ### `queue.process(type, processor)`
 
@@ -471,30 +504,31 @@ Registers an async processor for a job type. The processor signature is `async (
 
 ### `queue.createWorker(options?)`
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `concurrency` | `number` | queue config | Maximum simultaneous job executions |
-| `shutdownTimeout` | `number` | `30000` | Graceful shutdown wait time in ms |
+| Option            | Type     | Default      | Description                         |
+| ----------------- | -------- | ------------ | ----------------------------------- |
+| `concurrency`     | `number` | queue config | Maximum simultaneous job executions |
+| `shutdownTimeout` | `number` | `30000`      | Graceful shutdown wait time in ms   |
 
 ### `queue.getJob(id)` / `queue.getJobs(status?, limit?, offset?)`
+
 ### `queue.getJobCounts()`
 
 ---
 
 ## Storage Support Matrix
 
-| Feature | Memory | Redis | PostgreSQL | MySQL |
-|---|:---:|:---:|:---:|:---:|
-| Persistence | — | ✓ | ✓ | ✓ |
-| Atomic claim | ✓ | ✓ (Lua) | ✓ (SKIP LOCKED) | ✓ (SKIP LOCKED) |
-| Priority ordering | ✓ | ✓ | ✓ | ✓ |
-| Delayed jobs | ✓ | ✓ | ✓ | ✓ |
-| Retry + backoff | ✓ | ✓ | ✓ | ✓ |
-| DLQ | ✓ | ✓ | ✓ | ✓ |
-| Stalled recovery | ✓ | ✓ | ✓ | ✓ |
-| Rate limiting | ✓ | ✓ | ✓ | ✓ |
-| Connection check on init | — | ✓ PING | ✓ SELECT 1 | ✓ SELECT 1 |
-| Auto-create schema | — | — | ✓ | ✓ |
+| Feature                  | Memory |  Redis  |   PostgreSQL    |      MySQL      |
+| ------------------------ | :----: | :-----: | :-------------: | :-------------: |
+| Persistence              |   —    |    ✓    |        ✓        |        ✓        |
+| Atomic claim             |   ✓    | ✓ (Lua) | ✓ (SKIP LOCKED) | ✓ (SKIP LOCKED) |
+| Priority ordering        |   ✓    |    ✓    |        ✓        |        ✓        |
+| Delayed jobs             |   ✓    |    ✓    |        ✓        |        ✓        |
+| Retry + backoff          |   ✓    |    ✓    |        ✓        |        ✓        |
+| DLQ                      |   ✓    |    ✓    |        ✓        |        ✓        |
+| Stalled recovery         |   ✓    |    ✓    |        ✓        |        ✓        |
+| Rate limiting            |   ✓    |    ✓    |        ✓        |        ✓        |
+| Connection check on init |   —    | ✓ PING  |   ✓ SELECT 1    |   ✓ SELECT 1    |
+| Auto-create schema       |   —    |    —    |        ✓        |        ✓        |
 
 ---
 
