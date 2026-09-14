@@ -8,6 +8,7 @@ Follow the architecture and rules in [ARCHITECTURE.md](./ARCHITECTURE.md) and [R
 - Check the existing interfaces and public API.
 - Keep changes focused and avoid unrelated refactors.
 - Think through reliability, concurrency, retries, and recovery impact.
+- Don't add any lines on [CHANGELOG.md](../CHANGELOG.md) and don't run [CHANGELOG SCRIPT](../changelog.sh). We'll update run this later. You can add lines in subdirectory changelog files.
 
 ## Design Rules
 
