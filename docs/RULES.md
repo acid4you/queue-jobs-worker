@@ -164,7 +164,9 @@ Documentation must clearly distinguish between:
 
 ---
 
-## 15. General Rule
+## 15. General Rules
+
+- Don't add any lines on [CHANGELOG.md](../CHANGELOG.md) and don't run [CHANGELOG SCRIPT](../changelog.sh). We'll update run this later. You can add lines in subdirectory changelog files.
 
 **Reliability and correctness take priority over convenience.**
 
