@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { CLAIM_LUA, RECOVER_STALLED_LUA, RENEW_LOCK_LUA } from "../src/lib/scripts/index.js";
+import {
+  CLAIM_LUA,
+  RECOVER_STALLED_LUA,
+  RENEW_LOCK_LUA,
+  RATE_LIMIT_LUA,
+} from "../src/lib/scripts/index.js";
 
 describe("Lua scripts", () => {
   describe("CLAIM_LUA", () => {
@@ -85,6 +90,34 @@ describe("Lua scripts", () => {
 
     it("returns 1 on successful renewal", () => {
       expect(RENEW_LOCK_LUA).toContain("return 1");
+    });
+  });
+
+  describe("RATE_LIMIT_LUA", () => {
+    it("is a non-empty string", () => {
+      expect(typeof RATE_LIMIT_LUA).toBe("string");
+      expect(RATE_LIMIT_LUA.trim().length).toBeGreaterThan(0);
+    });
+
+    it("checks existing window timestamp", () => {
+      expect(RATE_LIMIT_LUA).toContain("redis.call('GET', tk)");
+    });
+
+    it("resets counter on fresh or expired window", () => {
+      expect(RATE_LIMIT_LUA).toContain("redis.call('SET', ck, '1', 'EX', ttlSec)");
+      expect(RATE_LIMIT_LUA).toContain("redis.call('SET', tk, tostring(nowMs), 'EX', ttlSec)");
+    });
+
+    it("rejects request when count reaches max", () => {
+      expect(RATE_LIMIT_LUA).toContain("if current >= max then");
+      expect(RATE_LIMIT_LUA).toContain("return 0");
+    });
+
+    it("increments count and refreshes TTL when under max", () => {
+      expect(RATE_LIMIT_LUA).toContain("redis.call('INCR', ck)");
+      expect(RATE_LIMIT_LUA).toContain("redis.call('EXPIRE', ck, ttlSec)");
+      expect(RATE_LIMIT_LUA).toContain("redis.call('EXPIRE', tk, ttlSec)");
+      expect(RATE_LIMIT_LUA).toContain("return 1");
     });
   });
 });
