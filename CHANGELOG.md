@@ -4,6 +4,19 @@ All notable changes to **queue-jobs-worker** will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.0.5] — 2026-09-15
+
+### Core
+
+### Fixed
+
+- **Storage Initialization Enforcement prior to Queue Creation & Execution** ([#14](https://github.com/rafidahmed870/queue-jobs-worker/issues/14))
+
+  `QueueClient.createQueue()` and Queue operations now enforce that `await client.init()` has completed before creating external queues or executing operations, preventing job loss from binding to temporary in-memory adapters.
+
+---
+
 ## [1.0.4] — 2026-09-13
 
 ### Core
