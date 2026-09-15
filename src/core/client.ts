@@ -72,6 +72,9 @@ export class QueueClient {
     // Memory adapter is built eagerly (no I/O needed).
     // External adapters are built eagerly too, but require init() before use.
     this._storage = this.buildMemoryOrEagerAdapter();
+    if (this.dialect === "memory") {
+      this.initialised = true;
+    }
     this.emitter = new QueueEventEmitter();
   }
 
@@ -169,12 +172,20 @@ export class QueueClient {
       throw new Error(`A queue named "${name}" already exists on this client.`);
     }
 
-    // Auto-init for memory (harmless no-op).
-    if (!this.initialised && this.dialect === "memory") {
-      void this.init();
+    if (!this.initialised) {
+      throw new Error(
+        `QueueClient is not initialised. Call "await client.init()" before creating queues for dialect "${this.dialect}".`,
+      );
     }
 
-    const queue = new Queue<TPayload>(name, this._storage, this.emitter, options, this.defaults);
+    const queue = new Queue<TPayload>(
+      name,
+      this._storage,
+      this.emitter,
+      options,
+      this.defaults,
+      () => this.initialised,
+    );
     this.queues.set(name, queue as Queue<unknown>);
     return queue;
   }
@@ -259,6 +270,7 @@ export class QueueClient {
     const client = new QueueClient(options);
     client._storage = adapter;
     client._customAdapter = true;
+    client.initialised = false;
     return client;
   }
 }

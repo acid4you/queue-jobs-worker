@@ -2,6 +2,22 @@
 
 Changes to the core module: `QueueClient`, `Queue`, `Job`, `Worker`, `backoff`, and `id` utilities.
 
+## [1.0.5] — 2026-09-15
+
+### Fixed
+
+- **Storage Initialization Enforcement prior to Queue Creation & Execution** ([#14](https://github.com/rafidahmed870/queue-jobs-worker/issues/14))
+
+  Previously, `QueueClient.createQueue()` allowed queues to be created before `await client.init()` was called when using external storage dialects (e.g. Redis, PostgreSQL, MySQL). This caused the created queue to bind to the temporary `InMemoryStorageAdapter` instance. When `client.init()` was subsequently called, the real external storage adapter replaced the internal storage field on `QueueClient`, rendering previously enqueued jobs lost or inaccessible.
+
+  After the fix:
+
+  - `QueueClient.createQueue()` checks `isInitialised` before creating a queue. For external dialects and custom adapters, attempting to create a queue before `await client.init()` throws an explicit error.
+  - Queue operations (`enqueue`, `getJob`, `getJobs`, `getJobCounts`, and `createWorker`) enforce initialization status checks before executing, preventing operations on uninitialized storage.
+  - In-memory dialect continues to auto-initialize synchronously, preserving convenient single-line setup for tests and local development.
+
+---
+
 ## [1.0.4] — 2026-09-13
 
 ### Fixed

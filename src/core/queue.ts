@@ -56,6 +56,7 @@ export class Queue<TPayload = unknown> {
   private readonly emitter: QueueEventEmitter;
   private readonly resolvedConfig: Required<QueueOptions>;
   private readonly clientDefaults: ResolvedDefaults;
+  private readonly isInitialisedCheck?: (() => boolean) | undefined;
 
   /** Registered processors keyed by job type. */
   private readonly processors = new Map<string, Processor<unknown>>();
@@ -69,12 +70,22 @@ export class Queue<TPayload = unknown> {
     emitter: QueueEventEmitter,
     options: QueueOptions | undefined,
     defaults: ResolvedDefaults,
+    isInitialisedCheck?: (() => boolean) | undefined,
   ) {
     this.name = name;
     this.storage = storage;
     this.emitter = emitter;
     this.clientDefaults = defaults;
     this.resolvedConfig = mergeQueueConfig(options, defaults);
+    this.isInitialisedCheck = isInitialisedCheck;
+  }
+
+  private assertInitialised(): void {
+    if (this.isInitialisedCheck && !this.isInitialisedCheck()) {
+      throw new Error(
+        `Cannot execute queue operations on queue "${this.name}" because the QueueClient is not initialised. Call "await client.init()" first.`,
+      );
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -89,6 +100,7 @@ export class Queue<TPayload = unknown> {
    * @param options - Per-job overrides (attempts, delay, priority, etc.).
    */
   async enqueue(type: string, payload: TPayload, options?: JobOptions): Promise<Job<TPayload>> {
+    this.assertInitialised();
     const cfg = this.resolvedConfig;
     const now = new Date();
 
@@ -145,6 +157,7 @@ export class Queue<TPayload = unknown> {
    * Worker-level `concurrency` overrides queue-level concurrency.
    */
   createWorker(options?: WorkerOptions): Worker {
+    this.assertInitialised();
     const worker = new Worker(
       this.name,
       this.storage,
@@ -166,6 +179,7 @@ export class Queue<TPayload = unknown> {
 
   /** Fetch a single job by its ID. Returns null if not found or wrong queue. */
   async getJob(jobId: string): Promise<Job<TPayload> | null> {
+    this.assertInitialised();
     const raw = await this.storage.getJob<TPayload>(jobId);
     if (!raw || raw.queue !== this.name) return null;
     return new Job<TPayload>(raw);
@@ -173,6 +187,7 @@ export class Queue<TPayload = unknown> {
 
   /** Fetch jobs from this queue, optionally filtered by status. */
   async getJobs(status?: JobStatus, limit = 100, offset = 0): Promise<Job<TPayload>[]> {
+    this.assertInitialised();
     const raws = await this.storage.getJobs<TPayload>({
       queue: this.name,
       ...(status !== undefined && { status }),
@@ -184,6 +199,7 @@ export class Queue<TPayload = unknown> {
 
   /** Get job counts by status for this queue. */
   async getJobCounts(): Promise<Record<JobStatus, number>> {
+    this.assertInitialised();
     return this.storage.getJobCounts(this.name);
   }
 
