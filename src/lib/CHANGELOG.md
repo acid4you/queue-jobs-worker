@@ -12,7 +12,8 @@ Changes to the lib module: shared utilities and internal script loaders.
   - `claim.lua` — atomic job claim with delayed-job promotion.
   - `recover-stalled.lua` — compare-and-swap stalled job recovery.
   - `renew-lock.lua` — atomic lock renewal with ownership guard.
-  - `lib/scripts/index.ts` re-exports all three scripts as named string constants (`CLAIM_LUA`, `RECOVER_STALLED_LUA`, `RENEW_LOCK_LUA`).
+  - `rate-limit.lua` — atomic rate limit decision, reset, and counter increment.
+  - `lib/scripts/index.ts` re-exports scripts as named string constants (`CLAIM_LUA`, `RECOVER_STALLED_LUA`, `RENEW_LOCK_LUA`, `RATE_LIMIT_LUA`).
   - Scripts are embedded into the CJS/ESM distribution bundles at build time via `tsup`'s `loader: { ".lua": "text" }`.
 
 ---

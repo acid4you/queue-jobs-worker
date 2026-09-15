@@ -511,28 +511,48 @@ export class PostgreSQLStorageAdapter implements StorageAdapter {
     now: string,
   ): Promise<boolean> {
     const nowMs = new Date(now).getTime();
+    const client: PgPoolClient = await this.pool.connect();
 
-    const res = await this.pool.query<{ count: number; window_start: string }>(
-      "SELECT count, window_start FROM qjw_rate_limits WHERE queue = $1",
-      [queue],
-    );
+    try {
+      await client.query("BEGIN");
 
-    if (res.rows.length === 0 || nowMs - Number(res.rows[0]?.window_start ?? 0) >= windowMs) {
-      // New window — upsert with count = 1.
-      await this.pool.query(
-        `INSERT INTO qjw_rate_limits (queue, count, window_start)
-         VALUES ($1, 1, $2)
-         ON CONFLICT (queue) DO UPDATE
-           SET count = 1, window_start = EXCLUDED.window_start`,
-        [queue, nowMs],
+      await client.query(
+        `INSERT INTO qjw_rate_limits (queue, count, window_start) VALUES ($1, 0, 0)
+         ON CONFLICT (queue) DO NOTHING`,
+        [queue],
       );
+
+      const res = await client.query<{ count: number; window_start: string }>(
+        "SELECT count, window_start FROM qjw_rate_limits WHERE queue = $1 FOR UPDATE",
+        [queue],
+      );
+
+      const row = res.rows[0];
+      const windowStart = Number(row?.window_start ?? 0);
+      const count = Number(row?.count ?? 0);
+
+      if (!row || nowMs - windowStart >= windowMs) {
+        await client.query(
+          "UPDATE qjw_rate_limits SET count = 1, window_start = $2 WHERE queue = $1",
+          [queue, nowMs],
+        );
+        await client.query("COMMIT");
+        return true;
+      }
+
+      if (count >= max) {
+        await client.query("COMMIT");
+        return false;
+      }
+
+      await client.query("UPDATE qjw_rate_limits SET count = count + 1 WHERE queue = $1", [queue]);
+      await client.query("COMMIT");
       return true;
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
     }
-
-    const current = res.rows[0]!.count;
-    if (current >= max) return false;
-
-    await this.pool.query("UPDATE qjw_rate_limits SET count = count + 1 WHERE queue = $1", [queue]);
-    return true;
   }
 }

@@ -30,7 +30,12 @@ import type {
   GetJobsFilter,
 } from "../types/storage.types.js";
 import type { JobData, JobStatus, JobAttempt } from "../types/job.types.js";
-import { CLAIM_LUA, RECOVER_STALLED_LUA, RENEW_LOCK_LUA } from "../lib/scripts/index.js";
+import {
+  CLAIM_LUA,
+  RECOVER_STALLED_LUA,
+  RENEW_LOCK_LUA,
+  RATE_LIMIT_LUA,
+} from "../lib/scripts/index.js";
 
 // ---------------------------------------------------------------------------
 // Lazy import — redis is an optional peer dependency
@@ -557,27 +562,13 @@ export class RedisStorageAdapter implements StorageAdapter {
     const nowMs = new Date(now).getTime();
     const ck = k.rateCount(queue);
     const tk = k.rateTs(queue);
+    const ttlSec = Math.max(1, Math.ceil(windowMs / 1000));
 
-    const windowStart = await this.client.get(tk);
-    const ttlSec = Math.ceil(windowMs / 1000);
+    const res = await this.client.eval(RATE_LIMIT_LUA, {
+      keys: [ck, tk],
+      arguments: [String(max), String(windowMs), String(nowMs), String(ttlSec)],
+    });
 
-    if (!windowStart || nowMs - Number(windowStart) >= windowMs) {
-      // Fresh window.
-      const multi = this.client.multi();
-      multi.set(ck, "1");
-      multi.expire(ck, ttlSec);
-      multi.set(tk, String(nowMs));
-      multi.expire(tk, ttlSec);
-      await multi.exec();
-      return true;
-    }
-
-    const count = await this.client.incr(ck);
-    if (count > max) {
-      await this.client.decr(ck);
-      return false;
-    }
-
-    return true;
+    return Number(res) === 1;
   }
 }

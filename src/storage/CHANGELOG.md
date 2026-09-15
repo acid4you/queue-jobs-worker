@@ -12,6 +12,14 @@ Changes to the storage module: `StorageAdapter` interface and all adapter implem
   - Changed `RedisStorageAdapter` to use `now_iso` from `ARGV[3]` for `updatedAt` in `CLAIM_LUA` and `RECOVER_STALLED_LUA`.
   - Previously, `updatedAt` was sometimes derived from `lockExpiresAt`, which could differ from the actual time of the operation.
 
+### Fixed
+
+- **Atomic rate limiting across Redis, PostgreSQL, and MySQL adapters**
+  - `RedisStorageAdapter`: Implemented `rate-limit.lua` (`RATE_LIMIT_LUA`) script to perform window check, expiry reset, counter evaluation, increment, and TTL renewal atomically inside Redis.
+  - `PostgreSQLStorageAdapter`: Wrapped `checkAndIncrementRateLimit` in a pool client transaction (`BEGIN ... COMMIT`) utilizing `INSERT ... ON CONFLICT DO NOTHING` and `SELECT ... FOR UPDATE` row locking.
+  - `MySQLStorageAdapter`: Wrapped `checkAndIncrementRateLimit` in a connection transaction (`beginTransaction ... commit`) utilizing `INSERT ... ON DUPLICATE KEY UPDATE` and `SELECT ... FOR UPDATE` row locking.
+
+
 ---
 
 ## [1.0.2] — 2026-09-05

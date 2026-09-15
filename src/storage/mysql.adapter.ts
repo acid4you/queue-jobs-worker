@@ -548,26 +548,48 @@ export class MySQLStorageAdapter implements StorageAdapter {
     now: string,
   ): Promise<boolean> {
     const nowMs = new Date(now).getTime();
+    const conn: MySQLConnection = await this.pool.getConnection();
 
-    const [rows] = await this.pool.query<RowDataPacket[]>(
-      "SELECT count, window_start FROM qjw_rate_limits WHERE queue = ?",
-      [queue],
-    );
+    try {
+      await conn.beginTransaction();
 
-    const existing = (rows as RowDataPacket[])[0];
-
-    if (!existing || nowMs - Number(existing["window_start"]) >= windowMs) {
-      await this.pool.query(
-        `INSERT INTO qjw_rate_limits (queue, count, window_start) VALUES (?,1,?)
-         ON DUPLICATE KEY UPDATE count = 1, window_start = VALUES(window_start)`,
-        [queue, nowMs],
+      await conn.query(
+        `INSERT INTO qjw_rate_limits (queue, count, window_start) VALUES (?, 0, 0)
+         ON DUPLICATE KEY UPDATE queue = queue`,
+        [queue],
       );
+
+      const [rows] = await conn.query<RowDataPacket[]>(
+        "SELECT count, window_start FROM qjw_rate_limits WHERE queue = ? FOR UPDATE",
+        [queue],
+      );
+
+      const existing = (rows as RowDataPacket[])[0];
+      const windowStart = Number(existing?.["window_start"] ?? 0);
+      const count = Number(existing?.["count"] ?? 0);
+
+      if (!existing || nowMs - windowStart >= windowMs) {
+        await conn.query("UPDATE qjw_rate_limits SET count = 1, window_start = ? WHERE queue = ?", [
+          nowMs,
+          queue,
+        ]);
+        await conn.commit();
+        return true;
+      }
+
+      if (count >= max) {
+        await conn.commit();
+        return false;
+      }
+
+      await conn.query("UPDATE qjw_rate_limits SET count = count + 1 WHERE queue = ?", [queue]);
+      await conn.commit();
       return true;
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
     }
-
-    if (Number(existing["count"]) >= max) return false;
-
-    await this.pool.query("UPDATE qjw_rate_limits SET count = count + 1 WHERE queue = ?", [queue]);
-    return true;
   }
 }
