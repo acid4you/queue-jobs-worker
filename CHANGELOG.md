@@ -13,7 +13,81 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - **Storage Initialization Enforcement prior to Queue Creation & Execution** ([#14](https://github.com/rafidahmed870/queue-jobs-worker/issues/14))
 
-  `QueueClient.createQueue()` and Queue operations now enforce that `await client.init()` has completed before creating external queues or executing operations, preventing job loss from binding to temporary in-memory adapters.
+  Previously, `QueueClient.createQueue()` allowed queues to be created before `await client.init()` was called when using external storage dialects (e.g. Redis, PostgreSQL, MySQL). This caused the created queue to bind to the temporary `InMemoryStorageAdapter` instance. When `client.init()` was subsequently called, the real external storage adapter replaced the internal storage field on `QueueClient`, rendering previously enqueued jobs lost or inaccessible.
+
+  After the fix:
+
+  - `QueueClient.createQueue()` checks `isInitialised` before creating a queue. For external dialects and custom adapters, attempting to create a queue before `await client.init()` throws an explicit error.
+  - Queue operations (`enqueue`, `getJob`, `getJobs`, `getJobCounts`, and `createWorker`) enforce initialization status checks before executing, preventing operations on uninitialized storage.
+  - In-memory dialect continues to auto-initialize synchronously, preserving convenient single-line setup for tests and local development.
+
+---
+
+### Events
+
+### Added
+
+- `QueueEventEmitter` — strongly-typed lifecycle event bus shared across all components.
+- Emits events for the full job lifecycle: enqueued, started, completed, failed, retrying, dead, stalled.
+- All event payloads fully typed via `events.types.ts`.
+
+---
+
+<!-- Links -->
+[1.0.0]: https://github.com/rafidahmed870/queue-jobs-worker/releases/tag/v1.0.0
+
+### Lib
+
+### Added
+
+- **`lib/scripts/` — Redis Lua scripts extracted to standalone `.lua` files**
+  - `claim.lua` — atomic job claim with delayed-job promotion.
+  - `recover-stalled.lua` — compare-and-swap stalled job recovery.
+  - `renew-lock.lua` — atomic lock renewal with ownership guard.
+  - `rate-limit.lua` — atomic rate limit decision, reset, and counter increment.
+  - `lib/scripts/index.ts` re-exports scripts as named string constants (`CLAIM_LUA`, `RECOVER_STALLED_LUA`, `RENEW_LOCK_LUA`, `RATE_LIMIT_LUA`).
+  - Scripts are embedded into the CJS/ESM distribution bundles at build time via `tsup`'s `loader: { ".lua": "text" }`.
+
+---
+
+### Storage
+
+### Added
+
+- **Consistent timestamps across Lua scripts**
+  - Changed `RedisStorageAdapter` to use `now_iso` from `ARGV[3]` for `updatedAt` in `CLAIM_LUA` and `RECOVER_STALLED_LUA`.
+  - Previously, `updatedAt` was sometimes derived from `lockExpiresAt`, which could differ from the actual time of the operation.
+
+### Fixed
+
+- **Atomic rate limiting across Redis, PostgreSQL, and MySQL adapters**
+  - `RedisStorageAdapter`: Implemented `rate-limit.lua` (`RATE_LIMIT_LUA`) script to perform window check, expiry reset, counter evaluation, increment, and TTL renewal atomically inside Redis.
+  - `PostgreSQLStorageAdapter`: Wrapped `checkAndIncrementRateLimit` in a pool client transaction (`BEGIN ... COMMIT`) utilizing `INSERT ... ON CONFLICT DO NOTHING` and `SELECT ... FOR UPDATE` row locking.
+  - `MySQLStorageAdapter`: Wrapped `checkAndIncrementRateLimit` in a connection transaction (`beginTransaction ... commit`) utilizing `INSERT ... ON DUPLICATE KEY UPDATE` and `SELECT ... FOR UPDATE` row locking.
+
+
+---
+
+### Types
+
+### Added
+
+- **`lua.d.ts` — ambient module declaration for `.lua` imports**
+  - Declares `declare module "*.lua"` so TypeScript recognises `.lua` files as `string`-exporting modules.
+  - Required by `src/lib/scripts/index.ts` to import Lua scripts directly without type errors.
+
+---
+
+### Tests
+
+### Added
+
+- **`lua-scripts.test.ts` — unit tests for Redis Lua scripts**
+  - 22 tests covering all four Lua scripts (`CLAIM_LUA`, `RECOVER_STALLED_LUA`, `RENEW_LOCK_LUA`, `RATE_LIMIT_LUA`).
+  - Verifies each script loads as a non-empty string from `src/lib/scripts/index.ts`.
+  - Asserts presence of critical Redis commands (`ZPOPMIN`, `ZRANGEBYSCORE`, `SADD`, `HSET`, `SREM`, `ZADD`, `INCR`, `EXPIRE`) and CAS/RateLimit guard conditions.
+- **`vitest.config.ts` — `rawLuaPlugin` added**
+  - Custom Vite transform plugin that loads `.lua` files as raw text strings during tests, mirroring `tsup`'s `loader: { ".lua": "text" }` used at build time.
 
 ---
 
@@ -47,123 +121,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ---
 
 <!-- Links -->
+
+[1.0.5]: https://github.com/rafidahmed870/queue-jobs-worker/compare/v1.0.0...v1.0.5
 [1.0.0]: https://github.com/rafidahmed870/queue-jobs-worker/releases/tag/v1.0.0
-
-### Storage
-
-### Fixed
-
-- **`recoverStalledJobs()` race condition — stale recovery overwrites a live job** ([#6](https://github.com/rafidahmed870/queue-jobs-worker/issues/6))
-
-  The previous implementation used a two-phase read-then-write pattern:
-
-  1. A fetch pipeline read `lockExpiresAt` and `priority` for all active jobs.
-  2. A separate write pipeline recovered every job whose lock appeared expired.
-
-  Between those two phases a worker could complete the job, fail it, or renew
-  its lock.  The write pipeline had no knowledge of that change and would
-  unconditionally overwrite the job back to `"waiting"`, causing duplicate
-  processing or data loss.
-
-  **`RedisStorageAdapter`** — the write pipeline has been replaced with a
-  per-job Lua script (`RECOVER_STALLED_LUA`) that implements a
-  **compare-and-swap (CAS)** guard.  The script atomically re-reads
-  `lockExpiresAt`, `lockId`, and `status` from the hash and aborts if any of
-  the three values differ from what the caller observed in the read phase.
-  Because Redis executes Lua scripts as a single indivisible command, no
-  concurrent write can slip between the re-read and the state update.  The
-  pre-filter (skip jobs whose lock has not yet expired) is preserved as an
-  optimisation to avoid unnecessary Lua round-trips.
-
-  **`InMemoryStorageAdapter`** — all operations run within a single event-loop
-  tick so the race is theoretical, but an equivalent CAS guard has been added
-  for consistency: `lockId` and `lockExpiresAt` are snapshotted at decision
-  time and re-validated immediately before the write.  Any interleaving that
-  mutated those fields will cause the recovery to be skipped.
-
----
-
-## [1.0.3] — 2026-09-09
-
-### Core
-
-### Fixed
-
-- **`Worker` — Job timeout cooperative cancellation via `AbortSignal`** ([#12](https://github.com/rafidahmed870/queue-jobs-worker/issues/12))
-
-  Previously, when a job attempt reached its configured `timeout`, the worker rejected the internal execution promise and marked the attempt as failed (or scheduled a retry), but the underlying processor `Promise` continued running in the background. This could lead to duplicate side effects when retries overlapped with timed-out attempts.
-
-  After the fix:
-
-  - `Processor` type signature is updated: `type Processor<TPayload = unknown> = (job: Job<TPayload>, signal: AbortSignal) => Promise<void>`.
-  - An `AbortController` is created for each job attempt.
-  - When job execution times out, the worker aborts the `AbortSignal` with a timeout error before rejecting the wrapper promise.
-  - User processors can monitor `signal.aborted` or pass `signal` to async operations (e.g. `fetch`, database queries, timers) for cooperative cancellation.
-
-### Package
-
-### Fixed
-
-- **`package.json` — Added `assets` to npm package `files` distribution**
-
-  Added `"assets"` to the `"files"` list in `package.json` so header banner graphics in `README.md` display properly on npmjs.com.
-
----
-
-## [1.0.2] — 2026-09-05
-
-### Core
-
-### Fixed
-
-- **`Worker` — croner added as a required dependency; invalid expressions no longer fall back to a 1-minute interval** ([#5](https://github.com/rafidahmed870/queue-jobs-worker/issues/5))
-
-  `enqueueCronNext()` previously attempted a dynamic `import("croner")` inside
-  a try/catch. If the import failed — or if the resolved `Cron` class was not a
-  function — the code silently fell back to `Date.now() + 60_000`, scheduling
-  the next run 60 seconds later regardless of the configured cron expression.
-  The same silent fallback was also triggered for invalid cron expressions that
-  caused the `Cron` constructor to throw.
-
-  After the fix:
-
-  - `croner` is now declared as a proper `dependency` in `package.json`
-    (`^10.0.1`) and imported statically, so it is always available without any
-    dynamic-import dance.
-  - If the `Cron` constructor throws (invalid expression), a descriptive
-    `worker:error` event is emitted and re-enqueue is skipped. The worker
-    remains running.
-  - If `cronInstance.nextRun()` returns `null` (the schedule has no future
-    occurrences), a `worker:error` is emitted and re-enqueue is skipped. Again,
-    the worker keeps running.
-  - The 1-minute fallback path has been removed entirely — there is no silent
-    fallback under any failure condition.
-
-- **`Worker` — rate-limit quota no longer consumed on empty-queue polls** ([#4](https://github.com/rafidahmed870/queue-jobs-worker/issues/4))
-
-  `claimNext()` previously called `checkAndIncrementRateLimit()` before
-  attempting to claim a job. This meant every poll cycle against an empty queue
-  burned a quota slot, potentially exhausting the configured window budget
-  before any real work was done. After the fix, the storage `claim()` call
-  happens first; the rate-limit counter is only incremented when a job is
-  actually claimed for processing. If the rate limit is reached at that point
-  the lock is immediately released via `releaseLock()` so the job remains
-  reclaimable on the next window.
-
----
-
-### Events
-
-### Added
-
-- `QueueEventEmitter` — strongly-typed lifecycle event bus shared across all components.
-- Emits events for the full job lifecycle: enqueued, started, completed, failed, retrying, dead, stalled.
-- All event payloads fully typed via `events.types.ts`.
-
----
-
-<!-- Links -->
-
 [1.0.4]: https://github.com/rafidahmed870/queue-jobs-worker/compare/v1.0.0...v1.0.4
 [1.0.0]: https://github.com/rafidahmed870/queue-jobs-worker/releases/tag/v1.0.0
 [1.0.3]: https://github.com/rafidahmed870/queue-jobs-worker/compare/v1.0.2...v1.0.3
