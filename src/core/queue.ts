@@ -55,7 +55,8 @@ export class Queue<TPayload = unknown> {
   private readonly storage: StorageAdapter;
   private readonly emitter: QueueEventEmitter;
   private readonly resolvedConfig: Required<QueueOptions>;
-  private readonly isInitialisedCheck?: () => boolean;
+  private readonly clientDefaults: ResolvedDefaults;
+  private readonly isInitialisedCheck?: (() => boolean) | undefined;
 
   /** Registered processors keyed by job type. */
   private readonly processors = new Map<string, Processor<unknown>>();
@@ -69,7 +70,7 @@ export class Queue<TPayload = unknown> {
     emitter: QueueEventEmitter,
     options: QueueOptions | undefined,
     defaults: ResolvedDefaults,
-    isInitialisedCheck?: () => boolean,
+    isInitialisedCheck?: (() => boolean) | undefined,
   ) {
     this.name = name;
     this.storage = storage;

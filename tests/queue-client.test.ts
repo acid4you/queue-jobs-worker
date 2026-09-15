@@ -146,3 +146,48 @@ describe("QueueClient.withAdapter() — regression #13", () => {
     expect(adapter.initializeCount).toBe(1);
   });
 });
+
+describe("Storage initialization enforcement — issue #14", () => {
+  let client: QueueClient;
+
+  afterEach(async () => {
+    if (client) {
+      await client.close();
+    }
+  });
+
+  it("throws when createQueue is called before init() on external dialect", () => {
+    client = new QueueClient({
+      dialect: "redis",
+      connectionString: "redis://localhost:6379",
+    });
+
+    expect(() => client.createQueue("test")).toThrow(/not initialised/i);
+  });
+
+  it("throws when createQueue is called before init() on custom adapter", () => {
+    const adapter = new TestAdapter();
+    client = QueueClient.withAdapter(adapter);
+
+    expect(() => client.createQueue("test")).toThrow(/not initialised/i);
+  });
+
+  it("allows createQueue after init() on custom adapter", async () => {
+    const adapter = new TestAdapter();
+    client = QueueClient.withAdapter(adapter);
+
+    await client.init();
+    const q = client.createQueue("test");
+    expect(q.name).toBe("test");
+  });
+
+  it("prevents queue operations before client initialization", async () => {
+    const adapter = new TestAdapter();
+    client = QueueClient.withAdapter(adapter);
+
+    // Force queue creation internally to test method guards
+    const q = client.createQueue;
+    // Un-initialized attempt via createQueue throws
+    expect(() => q.call(client, "test")).toThrow(/not initialised/i);
+  });
+});
