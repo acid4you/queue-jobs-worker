@@ -22,10 +22,19 @@ import type { QueueOptions } from "../types/queue.types.js";
 import type { ClientDefaults } from "../types/client.types.js";
 import { Job } from "./job.js";
 import { calculateBackoff, nextRunAt } from "./backoff.js";
-import { generateJobId } from "./id.js";
 import type { QueueEventEmitter } from "../events/emitter.js";
 
 type ResolvedDefaults = Required<ClientDefaults>;
+
+/**
+ * Helper to generate a deterministic job ID for the next occurrence of a cron job.
+ * Caps ID length and prevents nested `cron:cron:...` prefixes over multiple runs.
+ */
+export function generateCronNextJobId(currentJobId: string, nextDate: Date): string {
+  const match = /^cron:(.+):(\d+)$/.exec(currentJobId);
+  const rootId = match ? match[1]! : currentJobId;
+  return `cron:${rootId}:${nextDate.getTime()}`;
+}
 
 // ---------------------------------------------------------------------------
 // Resolved config helper
@@ -112,6 +121,7 @@ export class Worker {
 
     this.schedulePoll();
     this.scheduleStallCheck();
+    void this.recoverCronJobs();
   }
 
   /**
@@ -296,15 +306,22 @@ export class Worker {
         clearInterval(lockRenewTimer);
         lockRenewTimer = null;
       }
+
+      // Re-enqueue cron job for its next run BEFORE completing current job.
+      if (job.cron) {
+        try {
+          await this.enqueueCronNext(job);
+        } catch {
+          // If in-band retries fail, worker:error was emitted.
+          // We complete the job as its processor succeeded, and out-of-band
+          // recoverCronJobs() will pick up and recreate the missing next occurrence.
+        }
+      }
+
       await this.storage.complete(job.id, this.id);
 
       const completedData = (await this.storage.getJob(job.id)) ?? job._data;
       this.emitter.emit("job:completed", completedData);
-
-      // Re-enqueue cron job for its next run.
-      if (job.cron) {
-        await this.enqueueCronNext(job);
-      }
     } catch (err) {
       if (timeoutHandle) clearTimeout(timeoutHandle);
       if (lockRenewTimer) {
@@ -333,58 +350,69 @@ export class Worker {
   // -------------------------------------------------------------------------
 
   private async enqueueCronNext(job: Job<unknown>): Promise<void> {
+    let nextDate: Date | null;
+
     try {
-      // Resolve the next scheduled run using the croner package.
-      // croner is a required dependency — if the expression is invalid or has
-      // no future occurrences we emit a worker:error and skip re-enqueue
-      // rather than silently falling back to a 1-minute interval.
-      let nextDate: Date | null;
-
-      try {
-        const cronInstance = new Cron(job.cron as string);
-        nextDate = cronInstance.nextRun();
-      } catch (cronErr) {
-        // Cron expression is invalid or croner itself threw.
-        const error =
-          cronErr instanceof Error
-            ? cronErr
-            : new Error(
-                `croner failed to initialize for expression "${job.cron as string}": ${String(cronErr)}`,
-              );
-        this.emitter.emit("worker:error", this.id, error);
-        return; // Do not re-enqueue — invalid expression should not produce a job.
-      }
-
-      if (nextDate === null) {
-        // The cron schedule has no future occurrences (e.g. a bounded expression
-        // that has already elapsed). Emitting an error lets operators know the
-        // job will not recur rather than silently dropping it.
-        const error = new Error(
-          `Cron expression "${job.cron as string}" has no future occurrences — job "${job.id}" will not be re-enqueued`,
-        );
-        this.emitter.emit("worker:error", this.id, error);
-        return;
-      }
-
-      const runAt = nextDate.toISOString();
-
-      await this.storage.enqueue({
-        id: generateJobId(),
-        queue: this.queueName,
-        type: job.type,
-        payload: job._data.payload,
-        maxAttempts: job.maxAttempts,
-        retryDelay: job.retryDelay,
-        backoff: job.backoff,
-        timeout: job.timeout,
-        priority: job.priority,
-        runAt,
-        cron: job.cron,
-      });
-    } catch (err) {
-      // Cron re-enqueue failures must not crash the worker.
-      const error = err instanceof Error ? err : new Error(String(err));
+      const cronInstance = new Cron(job.cron as string);
+      const refDate = job.runAt ? new Date(job.runAt) : undefined;
+      nextDate = cronInstance.nextRun(refDate);
+    } catch (cronErr) {
+      // Cron expression is invalid or croner itself threw.
+      const error =
+        cronErr instanceof Error
+          ? cronErr
+          : new Error(
+              `croner failed to initialize for expression "${job.cron as string}": ${String(cronErr)}`,
+            );
       this.emitter.emit("worker:error", this.id, error);
+      return; // Do not re-enqueue — invalid expression should not produce a job.
+    }
+
+    if (nextDate === null) {
+      // The cron schedule has no future occurrences (e.g. a bounded expression
+      // that has already elapsed). Emitting an error lets operators know the
+      // job will not recur rather than silently dropping it.
+      const error = new Error(
+        `Cron expression "${job.cron as string}" has no future occurrences — job "${job.id}" will not be re-enqueued`,
+      );
+      this.emitter.emit("worker:error", this.id, error);
+      return;
+    }
+
+    const runAt = nextDate.toISOString();
+    const nextJobId = generateCronNextJobId(job.id, nextDate);
+    const payload = job._data
+      ? job._data.payload
+      : (job as unknown as { payload: unknown }).payload;
+
+    let attempt = 0;
+    const maxRetries = 3;
+
+    while (true) {
+      attempt++;
+      try {
+        await this.storage.enqueue({
+          id: nextJobId,
+          queue: this.queueName,
+          type: job.type,
+          payload,
+          maxAttempts: job.maxAttempts,
+          retryDelay: job.retryDelay,
+          backoff: job.backoff,
+          timeout: job.timeout,
+          priority: job.priority,
+          runAt,
+          cron: job.cron,
+        });
+        break; // Successfully enqueued next occurrence
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        this.emitter.emit("worker:error", this.id, error);
+        if (attempt >= maxRetries) {
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+      }
     }
   }
 
@@ -455,11 +483,67 @@ export class Worker {
         this.emitter.emit("job:stalled", jobId);
         this.emitter.emit("job:recovered", jobId);
       }
+
+      await this.recoverCronJobs();
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       this.emitter.emit("worker:error", this.id, error);
     }
 
     this.scheduleStallCheck();
+  }
+
+  /**
+   * Cron job recovery — scans completed cron jobs in this worker's queue and ensures
+   * that their next scheduled occurrence exists in storage.
+   */
+  private async recoverCronJobs(): Promise<void> {
+    if (this._status !== "running") return;
+
+    try {
+      const completedJobs = await this.storage.getJobs({
+        queue: this.queueName,
+        status: "completed",
+        limit: 100,
+      });
+
+      for (const job of completedJobs) {
+        if (!job.cron) continue;
+
+        let nextDate: Date | null;
+        try {
+          const cronInstance = new Cron(job.cron);
+          const refDate = job.runAt ? new Date(job.runAt) : undefined;
+          nextDate = cronInstance.nextRun(refDate);
+        } catch {
+          // Ignore invalid cron expressions during recovery scan
+          continue;
+        }
+
+        if (nextDate === null) continue;
+
+        const nextJobId = generateCronNextJobId(job.id, nextDate);
+        const existing = await this.storage.getJob(nextJobId);
+
+        if (!existing) {
+          await this.storage.enqueue({
+            id: nextJobId,
+            queue: this.queueName,
+            type: job.type,
+            payload: job.payload,
+            maxAttempts: job.maxAttempts,
+            retryDelay: job.retryDelay,
+            backoff: job.backoff,
+            timeout: job.timeout,
+            priority: job.priority,
+            runAt: nextDate.toISOString(),
+            cron: job.cron,
+          });
+        }
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emitter.emit("worker:error", this.id, error);
+    }
   }
 }

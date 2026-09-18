@@ -2,6 +2,23 @@
 
 Changes to the core module: `QueueClient`, `Queue`, `Job`, `Worker`, `backoff`, and `id` utilities.
 
+## [1.0.6] - 2026-09-19
+
+### Fixed
+
+- **Durable & Recoverable Cron Rescheduling**
+
+  Previously, when a cron job completed successfully, `Worker` attempted to create the next occurrence after marking the current job as completed. If `storage.enqueue()` failed due to temporary storage errors or network glitches, the error was only emitted as `worker:error`, permanently stopping the recurring schedule.
+
+  After the fix:
+
+  - Cron next-occurrence IDs are generated deterministically (`cron:<rootId>:<nextRunAtMs>`) and bounded in length.
+  - Storage adapter idempotency (`ON CONFLICT DO NOTHING` / `INSERT IGNORE` / `exists`) guarantees duplicate occurrences are never created during retries or recovery.
+  - Cron rescheduling occurs before completing the job, with in-band retries for transient storage errors.
+  - A background `recoverCronJobs()` process runs on worker startup and stall-check cycles to automatically detect and recreate any missed cron occurrences.
+
+---
+
 ## [1.0.5] — 2026-09-15
 
 ### Fixed
