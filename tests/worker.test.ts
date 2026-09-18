@@ -635,4 +635,201 @@ describe("Worker — job timeout cancellation (issue #12)", () => {
 
     await worker.stop();
   });
+
+  // ---------------------------------------------------------------------------
+  // Durable & Recoverable Cron Job Rescheduling Tests
+  // ---------------------------------------------------------------------------
+
+  describe("Durable Cron Rescheduling & Recovery", () => {
+    it("generates deterministic and bounded cron next job IDs", async () => {
+      const { generateCronNextJobId } = await import("../src/core/worker.js");
+      const nextDate = new Date("2026-09-19T03:00:00.000Z");
+      const ts = nextDate.getTime();
+
+      // Root job ID -> cron:job-1:<timestamp>
+      const id1 = generateCronNextJobId("job-1", nextDate);
+      expect(id1).toBe(`cron:job-1:${ts}`);
+
+      // Sub-occurrence job ID -> cron:job-1:<nextTimestamp> (doesn't nest prefixes)
+      const nextDate2 = new Date("2026-09-20T03:00:00.000Z");
+      const ts2 = nextDate2.getTime();
+      const id2 = generateCronNextJobId(id1, nextDate2);
+      expect(id2).toBe(`cron:job-1:${ts2}`);
+    });
+
+    it("retries transient storage.enqueue errors during cron rescheduling in-band", async () => {
+      const { InMemoryStorageAdapter } = await import("../src/storage/in-memory.adapter.js");
+      const { QueueEventEmitter } = await import("../src/events/emitter.js");
+      const { Worker } = await import("../src/core/worker.js");
+
+      const adapter = new InMemoryStorageAdapter();
+      await adapter.initialize();
+
+      let enqueueAttempts = 0;
+      const originalEnqueue = adapter.enqueue.bind(adapter);
+      // Fail the first enqueue attempt for the next occurrence, succeed on retry
+      adapter.enqueue = async (input) => {
+        if (input.id.startsWith("cron:")) {
+          enqueueAttempts++;
+          if (enqueueAttempts === 1) {
+            throw new Error("Transient storage connection error");
+          }
+        }
+        return originalEnqueue(input);
+      };
+
+      const emitter = new QueueEventEmitter();
+      const processors = new Map();
+
+      const worker = new Worker(
+        "cron-transient-test",
+        adapter,
+        emitter,
+        processors,
+        {},
+        { pollInterval: 50 },
+        {
+          concurrency: 1,
+          attempts: 1,
+          retryDelay: 0,
+          backoff: "fixed",
+          timeout: 5_000,
+          pollInterval: 50,
+          stalledInterval: 60_000,
+          lockDuration: 30_000,
+          rateLimit: undefined,
+        },
+      );
+
+      const workerErrors: Error[] = [];
+      emitter.on("worker:error", (_id, err) => workerErrors.push(err));
+
+      const raw = await originalEnqueue({
+        id: "cron-transient-job",
+        queue: "cron-transient-test",
+        type: "task",
+        payload: {},
+        maxAttempts: 1,
+        retryDelay: 0,
+        backoff: "fixed",
+        timeout: 5_000,
+        priority: 0,
+        runAt: new Date(Date.now() - 100).toISOString(),
+        cron: "0 2 * * *",
+      });
+
+      // Execute enqueueCronNext
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (worker as any).enqueueCronNext({
+        id: raw.id,
+        _data: raw,
+        cron: raw.cron,
+        type: raw.type,
+        maxAttempts: raw.maxAttempts,
+        retryDelay: raw.retryDelay,
+        backoff: raw.backoff,
+        timeout: raw.timeout,
+        priority: raw.priority,
+        runAt: raw.runAt,
+      });
+
+      // The transient error was emitted during retry 1
+      expect(workerErrors).toHaveLength(1);
+      expect(workerErrors[0]!.message).toContain("Transient storage connection error");
+
+      // Next occurrence was created on retry 2
+      const jobs = await adapter.getJobs({ queue: "cron-transient-test", limit: 10 });
+      expect(jobs).toHaveLength(2);
+
+      await adapter.close();
+    });
+
+    it("recreates missed cron occurrences via recoverCronJobs after storage failure or worker restart", async () => {
+      const { InMemoryStorageAdapter } = await import("../src/storage/in-memory.adapter.js");
+      const { QueueEventEmitter } = await import("../src/events/emitter.js");
+      const { Worker } = await import("../src/core/worker.js");
+
+      const adapter = new InMemoryStorageAdapter();
+      await adapter.initialize();
+
+      // Enqueue a completed cron job where next occurrence was NOT enqueued (e.g. storage outage)
+      const now = new Date();
+      const pastRunAt = new Date(now.getTime() - 60_000).toISOString();
+
+      await adapter.enqueue({
+        id: "cron-completed-job",
+        queue: "cron-recovery-test",
+        type: "daily-task",
+        payload: { key: "value" },
+        maxAttempts: 1,
+        retryDelay: 0,
+        backoff: "fixed",
+        timeout: 5_000,
+        priority: 0,
+        runAt: pastRunAt,
+        cron: "*/5 * * * *",
+      });
+
+      // Claim and complete the job
+      await adapter.claim({
+        queue: "cron-recovery-test",
+        lockId: "worker-1",
+        lockDuration: 30_000,
+        now: pastRunAt,
+      });
+      await adapter.complete("cron-completed-job", "worker-1");
+
+      // Verify only 1 job exists in storage (and no next occurrence)
+      let jobs = await adapter.getJobs({ queue: "cron-recovery-test", limit: 10 });
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]!.status).toBe("completed");
+
+      const emitter = new QueueEventEmitter();
+      const worker = new Worker(
+        "cron-recovery-test",
+        adapter,
+        emitter,
+        new Map(),
+        {},
+        { pollInterval: 50 },
+        {
+          concurrency: 1,
+          attempts: 1,
+          retryDelay: 0,
+          backoff: "fixed",
+          timeout: 5_000,
+          pollInterval: 50,
+          stalledInterval: 60_000,
+          lockDuration: 30_000,
+          rateLimit: undefined,
+        },
+      );
+
+      // Run recoverCronJobs directly (set running status)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (worker as any)._status = "running";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (worker as any).recoverCronJobs();
+
+      // Next occurrence has now been recovered and created in storage!
+      jobs = await adapter.getJobs({ queue: "cron-recovery-test", limit: 10 });
+      expect(jobs).toHaveLength(2);
+
+      const recoveredJob = jobs.find((j) => j.id !== "cron-completed-job");
+      expect(recoveredJob).toBeDefined();
+      expect(recoveredJob!.type).toBe("daily-task");
+      expect(recoveredJob!.payload).toEqual({ key: "value" });
+      expect(recoveredJob!.cron).toBe("*/5 * * * *");
+      expect(recoveredJob!.id).toContain("cron:cron-completed-job:");
+
+      // Running recoverCronJobs a second time must NOT create duplicate occurrences
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (worker as any).recoverCronJobs();
+
+      jobs = await adapter.getJobs({ queue: "cron-recovery-test", limit: 10 });
+      expect(jobs).toHaveLength(2);
+
+      await adapter.close();
+    });
+  });
 });

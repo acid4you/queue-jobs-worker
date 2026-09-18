@@ -2,6 +2,14 @@
 
 Changes to the test suite: unit tests, integration tests, and test infrastructure.
 
+## [1.0.6] — 2026-09-19
+
+### Added
+
+- **Tests for cron job rescheduling and background recovery**
+  - New integration test in `tests/worker.test.ts` verifies that `recoverCronJobs()` correctly recreates completed cron occurrences.
+  - Includes scenarios for missed jobs, background recovery, and storage adapter idempotency.
+
 ## [1.0.6] — 2026-09-16
 
 ### Added
