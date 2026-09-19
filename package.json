@@ -16,6 +16,42 @@
   "main": "index.js",
   "packageManager": "pnpm@11.22.0",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "format": "prettier --write .",
+    "prepare": "husky"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.1",
+    "@typescript-eslint/eslint-plugin": "^8.70.0",
+    "@typescript-eslint/parser": "^8.70.0",
+    "eslint": "^10.10.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.6",
+    "husky": "^9.1.7",
+    "prettier": "^3.9.8",
+    "tsup": "^8.5.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  },
+  "dependencies": {
+    "croner": "^10.0.1"
+  },
+  "peerDependencies": {
+    "mysql2": ">=3.0.0",
+    "pg": ">=8.0.0",
+    "redis": ">=4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "redis": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    },
+    "mysql2": {
+      "optional": true
+    }
   }
 }
