@@ -249,6 +249,27 @@ await worker.close(); // graceful shutdown — waits for in-flight jobs
 
 `close()` guarantees that any job currently being processed will finish before the worker stops. Safe to call before `client.close()`.
 
+Calling `start()` after `close()` throws — create a new `Worker` instance instead.
+
+### Shutting down a queue and all its workers at once
+
+`queue.close()` is the recommended shutdown pattern. It automatically stops every `Worker` that was created from this queue, waits for in-flight jobs to drain, then cancels all cron schedules:
+
+```ts
+// Instead of closing each worker individually:
+const queue = new Queue("emails", client);
+const w1 = new Worker(queue, handler, { concurrency: 2 });
+const w2 = new Worker(queue, handler, { concurrency: 2 });
+w1.start();
+w2.start();
+
+// One call closes everything tied to this queue:
+await queue.close();
+await client.close();
+```
+
+`queue.close()` is idempotent — calling it more than once is safe.
+
 ### Worker does not manage jobs
 
 All job management methods (`add`, `get`, `remove`, `list`, `count`) live on `Queue`. The Worker's only responsibility is execution.
@@ -635,6 +656,7 @@ worker.on("completed", (job, result) => {
 | `list(status?)`                   | `Promise<Job[]>`            | List jobs, optional status filter |
 | `clear()`                         | `Promise<void>`             | Remove all jobs                   |
 | `count()`                         | `Promise<number>`           | Total job count                   |
+| `close()`                         | `Promise<void>`             | Close all workers + cron (idempotent) |
 
 ### `Worker`
 
@@ -644,6 +666,7 @@ worker.on("completed", (job, result) => {
 | `start()`                           | `this`          | Start polling                  |
 | `close()`                           | `Promise<void>` | Graceful shutdown              |
 | `isRunning()`                       | `boolean`       | True while polling             |
+| `isClosed()`                        | `boolean`       | True after close()             |
 | `on(event, fn)`                     | `this`          | Subscribe to a lifecycle event |
 
 ### `Job`

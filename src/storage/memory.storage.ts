@@ -113,7 +113,12 @@ export class MemoryStorage implements IStorage {
   }
 
   async clearQueue(queueName: string): Promise<void> {
-    this.store.get(queueName)?.clear();
+    // BUG FIX: previously only cleared the inner Map, leaving an empty Map
+    // allocated forever per queue name — a minor memory leak for processes
+    // that create many ephemeral queue names.  Delete the outer entry entirely
+    // so the GC can reclaim it.  A subsequent saveJob will recreate it via
+    // getOrCreateQueue() as needed.
+    this.store.delete(queueName);
   }
 
   async countJobs(queueName: string): Promise<number> {

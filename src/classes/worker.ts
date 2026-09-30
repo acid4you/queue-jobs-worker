@@ -73,6 +73,7 @@ export class Worker<TData = unknown, TResult = unknown> extends EventEmitter {
   private readonly pollInterval: number;
 
   private running = false;
+  private _closed = false;
   private loopTimer: ReturnType<typeof setTimeout> | null = null;
   private activeCount = 0;
 
@@ -108,8 +109,15 @@ export class Worker<TData = unknown, TResult = unknown> extends EventEmitter {
   /**
    * Start the polling loop.
    * Calling start() on an already-running worker is a no-op.
+   * Calling start() after close() throws — create a new Worker instead.
    */
   public start(): this {
+    if (this._closed) {
+      throw new Error(
+        `[queue-jobs-worker] Worker[${this.queue.name}] has been closed and cannot be restarted. ` +
+        "Create a new Worker instance instead.",
+      );
+    }
     if (this.running) return this;
 
     this.running = true;
@@ -129,13 +137,10 @@ export class Worker<TData = unknown, TResult = unknown> extends EventEmitter {
    * Safe to call even if start() was never called.
    */
   public async close(): Promise<void> {
-    // BUG FIX: always unregister from the queue, even when the worker was
-    // never started. Previously, `if (!this.running) return` short-circuited
-    // before _unregisterWorker was reached, leaving a reference in the queue's
-    // _workers set forever and causing queue.close() to call close() on an
-    // already-closed (or never-started) worker again.
     if (!this.running) {
+      // Already closed or never started — ensure unregistered and flagged.
       this.queue._unregisterWorker(this);
+      this._closed = true;
       return;
     }
 
@@ -150,6 +155,7 @@ export class Worker<TData = unknown, TResult = unknown> extends EventEmitter {
     // Deregister from the queue — prevents a double-close if queue.close()
     // is called after this worker was already closed manually.
     this.queue._unregisterWorker(this);
+    this._closed = true;
 
     this.emit("stopped");
     this._log(`Worker[${this.queue.name}] stopped.`);
@@ -158,6 +164,11 @@ export class Worker<TData = unknown, TResult = unknown> extends EventEmitter {
   /** `true` while the polling loop is active. */
   public isRunning(): boolean {
     return this.running;
+  }
+
+  /** `true` after close() has been called. */
+  public isClosed(): boolean {
+    return this._closed;
   }
 
   // ── Typed EventEmitter overloads ──────────────────────────────────────────
@@ -250,9 +261,13 @@ export class Worker<TData = unknown, TResult = unknown> extends EventEmitter {
     // The job was already flipped to "active" atomically inside getNextJob()
     // (all storage backends do this). We only need to re-fetch here so the
     // emitted "active" event carries the latest fields (processedAt, updatedAt)
-    // that were set server-side. Writing status/processedAt again would create
-    // a second, slightly-later timestamp that overwrites the authoritative one.
-    const active = (await this.queue.get(job.id)) ?? job;
+    // that were set server-side.
+    // BUG FIX: the fallback `?? job` used the pre-active snapshot whose
+    // status is still "waiting" or "retrying". Force status to "active" in
+    // the fallback so downstream code (handler, events) never sees a stale
+    // status value.
+    const fetched = await this.queue.get(job.id).catch(() => undefined);
+    const active = fetched ?? { ...job, status: "active" as const };
     this.emit("active", active);
     this._log(
       `Worker[${this.queue.name}] processing "${job.name}" id=${job.id} ` +

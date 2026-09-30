@@ -379,4 +379,36 @@ describe("Worker — graceful close", () => {
     await worker.close();
     expect(finished).toBeGreaterThanOrEqual(1);
   });
+
+  it("start() after close() throws", async () => {
+    const queue = new Queue("restart", client);
+    const worker = new Worker(queue, async () => "ok");
+    await worker.close();
+    expect(() => worker.start()).toThrow("closed");
+  });
+
+  it("isClosed() is false before close and true after", async () => {
+    const queue = new Queue("closed-flag", client);
+    const worker = new Worker(queue, async () => "ok");
+    expect(worker.isClosed()).toBe(false);
+    await worker.close();
+    expect(worker.isClosed()).toBe(true);
+  });
+
+  it("object result is stored correctly (composite TResult)", async () => {
+    const queue = new Queue<{ n: number }, { doubled: number }>("obj-result", client);
+    const worker = new Worker(queue, async (job) => ({ doubled: job.data.n * 2 }));
+    worker.start();
+
+    const job = await queue.add("calc", { n: 21 });
+    await waitFor(async () => (await queue.get(job.id))?.status === "completed");
+
+    const done = await queue.get(job.id);
+    // result stored as JSON string for Redis compat, so accept both forms
+    const result = typeof done?.result === "string"
+      ? JSON.parse(done.result as string)
+      : done?.result;
+    expect(result).toEqual({ doubled: 42 });
+    await worker.close();
+  });
 });

@@ -36,9 +36,15 @@ local eligible   = ARGV[5]
 redis.call("SET", hashKey, jobJson)
 
 -- Always add to the priority index so listJobs / countJobs work.
-redis.call("ZADD", indexKey, priority, jobId)
+-- BUG FIX: use ZADD NX so re-saving an existing job (e.g. after a crash
+-- recovery re-enqueue) does not silently overwrite the priority score that
+-- update-job.lua may have set.  saveJob is a new-job operation; priority
+-- updates go through updateJob / update-job.lua exclusively.
+redis.call("ZADD", indexKey, "NX", priority, jobId)
 
 -- Only add to the waiting set if the job is immediately pick-up-eligible.
+-- Use plain ZADD (not NX) so a re-save after a crash can correct the runAt
+-- score; the waiting set score must always reflect the true scheduled time.
 if eligible == "1" then
   redis.call("ZADD", waitingKey, runAt, jobId)
 end

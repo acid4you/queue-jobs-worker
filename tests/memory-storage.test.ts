@@ -178,3 +178,55 @@ describe("MemoryStorage — disconnect", () => {
     expect(await fresh.countJobs("q")).toBe(0);
   });
 });
+
+describe("MemoryStorage — clearQueue removes outer entry", () => {
+  it("clearQueue removes the queue entry entirely (no memory leak)", async () => {
+    await storage.saveJob("q", makeJob({ id: "cl1" }));
+    await storage.clearQueue("q");
+    expect(await storage.countJobs("q")).toBe(0);
+    // Saving again after clear should work fine (entry recreated on demand).
+    await storage.saveJob("q", makeJob({ id: "cl2" }));
+    expect(await storage.countJobs("q")).toBe(1);
+  });
+});
+
+describe("MemoryStorage — getNextJob atomicity", () => {
+  it("two synchronous calls never return the same job", async () => {
+    const now = Date.now();
+    await storage.saveJob("q", makeJob({ id: "atom1", status: "waiting", runAt: now - 1 }));
+
+    // Fire both calls in the same microtask tick — Node.js is single-threaded
+    // so the synchronous Map.set inside getNextJob prevents double-claim.
+    const [a, b] = await Promise.all([
+      storage.getNextJob("q"),
+      storage.getNextJob("q"),
+    ]);
+
+    const claimed = [a, b].filter(Boolean);
+    expect(claimed).toHaveLength(1);
+  });
+});
+
+describe("MemoryStorage — updateJob null fields", () => {
+  it("null patch fields clear existing values", async () => {
+    const job = makeJob({ id: "null1", error: "oops", stacktrace: "at line 1" });
+    await storage.saveJob("q", job);
+    await storage.updateJob("q", "null1", {
+      status: "waiting",
+      error: null as unknown as string,
+      stacktrace: null as unknown as string,
+    });
+    const updated = await storage.getJob("q", "null1");
+    expect(updated?.error).toBeNull();
+    expect(updated?.stacktrace).toBeNull();
+  });
+});
+
+describe("MemoryStorage — saveJob upsert", () => {
+  it("re-saving with a different status overwrites the stored job", async () => {
+    await storage.saveJob("q", makeJob({ id: "ups1", status: "waiting" }));
+    await storage.saveJob("q", makeJob({ id: "ups1", status: "active" }));
+    const job = await storage.getJob("q", "ups1");
+    expect(job?.status).toBe("active");
+  });
+});

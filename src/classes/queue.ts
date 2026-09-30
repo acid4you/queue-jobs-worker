@@ -229,6 +229,15 @@ export class Queue<TData = unknown, TResult = unknown> {
    * @internal
    */
   public _registerWorker(worker: { close(): Promise<void> }): void {
+    // BUG FIX: throw if the queue is already closed so a Worker constructed
+    // after queue.close() does not leak silently into a dead set that will
+    // never be cleaned up.
+    if (this._closed) {
+      throw new Error(
+        `[queue-jobs-worker] Cannot create a Worker for Queue "${this.name}" ` +
+        "because the queue has already been closed.",
+      );
+    }
     this._workers.add(worker);
   }
 

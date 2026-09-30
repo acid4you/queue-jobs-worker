@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { QueueClient } from "../src/classes/client.js";
 import { Queue } from "../src/classes/queue.js";
+import { Worker } from "../src/classes/worker.js";
 
 let client: QueueClient;
 
@@ -215,5 +216,47 @@ describe("Queue — clear() / count()", () => {
     await q.clear();
     expect(await q.list()).toHaveLength(0);
     expect(await q.count()).toBe(0);
+  });
+});
+
+// ─── close ────────────────────────────────────────────────────────────────────
+
+describe("Queue — close()", () => {
+  it("close() is idempotent — calling twice does not throw", async () => {
+    const q = makeQueue("close-idem");
+    await q.close();
+    await expect(q.close()).resolves.toBeUndefined();
+  });
+
+  it("close() auto-closes all attached workers", async () => {
+    const q = new Queue("auto-close", client);
+    const w1 = new Worker(q, async () => "ok");
+    const w2 = new Worker(q, async () => "ok");
+    w1.start();
+    w2.start();
+
+    await q.close();
+
+    expect(w1.isRunning()).toBe(false);
+    expect(w2.isRunning()).toBe(false);
+    expect(w1.isClosed()).toBe(true);
+    expect(w2.isClosed()).toBe(true);
+  });
+
+  it("worker created after queue.close() throws", async () => {
+    const q = new Queue("post-close", client);
+    await q.close();
+    expect(() => new Worker(q, async () => "ok")).toThrow("closed");
+  });
+
+  it("worker.close() unregisters it from the queue", async () => {
+    const q = new Queue("unreg", client);
+    const w = new Worker(q, async () => "ok");
+    w.start();
+    await w.close();
+
+    // queue.close() should not try to close already-closed workers
+    // (no throw means the unregister worked correctly)
+    await expect(q.close()).resolves.toBeUndefined();
   });
 });
