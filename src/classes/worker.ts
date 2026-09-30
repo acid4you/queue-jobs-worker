@@ -128,9 +128,19 @@ export class Worker<
    * - No new jobs are picked up after this call.
    * - Already in-flight jobs are allowed to finish.
    * - Resolves once the poll loop has stopped and active count reaches 0.
+   *
+   * Safe to call even if start() was never called.
    */
   public async close(): Promise<void> {
-    if (!this.running) return;
+    // BUG FIX: always unregister from the queue, even when the worker was
+    // never started. Previously, `if (!this.running) return` short-circuited
+    // before _unregisterWorker was reached, leaving a reference in the queue's
+    // _workers set forever and causing queue.close() to call close() on an
+    // already-closed (or never-started) worker again.
+    if (!this.running) {
+      this.queue._unregisterWorker(this);
+      return;
+    }
 
     this.running = false;
     if (this.loopTimer) {
@@ -282,9 +292,29 @@ export class Worker<
     if (removeOnComplete) {
       await this.queue.remove(job.id);
     } else {
+      // BUG FIX: `result` can be any TResult — object, array, string, number,
+      // boolean, or null. The redis.storage.ts field encoder only handles scalar
+      // types directly; composite values (object/array) were silently skipped,
+      // leaving `result` unchanged in Redis storage.
+      // Fix: JSON-stringify any non-scalar result so it travels through the
+      // string encoder path. All storage backends (Postgres, MySQL, memory)
+      // already handle `result` as an opaque value inside the full payload
+      // object, so stringifying it here is correct for Redis and a no-op
+      // overhead for the others (they receive the patch object, not the
+      // raw encoded fields).
+      const encodedResult = (
+        result === null ||
+        result === undefined ||
+        typeof result === "string" ||
+        typeof result === "number" ||
+        typeof result === "boolean"
+      )
+        ? result
+        : (JSON.stringify(result) as unknown as TResult);
+
       await this.queue._updateJob(job.id, {
         status:     "completed",
-        result,
+        result:     encodedResult,
         finishedAt,
       });
     }

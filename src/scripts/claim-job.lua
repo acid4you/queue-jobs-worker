@@ -55,24 +55,33 @@ for _, jobId in ipairs(candidates) do
       raw = raw:gsub('"status":"[^"]*"', '"status":"active"', 1)
 
       -- Replace "updatedAt":<number> → current timestamp
-      raw = raw:gsub('"updatedAt":%d+', '"updatedAt":' .. nowStr, 1)
+      raw = raw:gsub('"updatedAt":[%d%.%-]+', '"updatedAt":' .. nowStr, 1)
 
-      -- Replace "processedAt":<number|null> or insert if missing
-      if raw:find('"processedAt":') then
-        raw = raw:gsub('"processedAt":[^,}]*', '"processedAt":' .. nowStr, 1)
+      -- BUG FIX: the old pattern  "processedAt":[^,}]*  only matched
+      -- non-string scalars (numbers, null, booleans).  If processedAt was
+      -- stored as a JSON string ("2024-...") the pattern stopped at the
+      -- opening quote and left the field partially replaced.
+      -- New approach: use two branches — a full JSON-string matcher first,
+      -- then a non-string scalar fallback — identical to the null-field
+      -- strategy used in update-job.lua.
+      if raw:find('"processedAt":', 1, true) then
+        raw = raw:gsub(
+          '"processedAt":("([^"\\]|\\.)*"|[^,}]+)',
+          '"processedAt":' .. nowStr,
+          1
+        )
       else
-        -- Insert before the closing brace
+        -- Field absent — insert before the closing brace of the top-level
+        -- object.  JSON always ends with "}", so this is safe.
         raw = raw:gsub('}$', ',"processedAt":' .. nowStr .. '}')
       end
 
       redis.call("SET", hashKey, raw)
 
-      -- BUG FIX: only remove from the *waiting* set, NOT from the index.
-      -- Removing from indexKey caused list-jobs.lua (which iterates the index)
-      -- to miss active jobs entirely, making listJobs("active") always empty.
+      -- NOTE: only remove from the *waiting* set, NOT from the index.
       -- The index set tracks ALL jobs regardless of status; only the waiting
       -- set gates which jobs are eligible for pickup.
-      -- indexKey entries are removed only when a job reaches a terminal state
+      -- Index entries are removed only when a job reaches a terminal state
       -- (completed / failed) via update-job.lua or remove-job.lua.
 
       return raw

@@ -142,10 +142,17 @@ export class RedisStorage implements IStorage {
   ): Promise<void> {
     const newStatus = (patch.status ?? "") as string;
     const nowMs     = String(Date.now());
-    const runAt     = String(patch.runAt ?? 0);
+
+    // BUG FIX: `patch.runAt ?? 0` defaulted to "0" whenever runAt was not in
+    // the patch (e.g. a simple status→completed update).  The Lua script then
+    // did ZADD waitingKey 0 jobId for "retrying" state, scheduling the retry
+    // in the distant past and making it immediately claimable — bypassing the
+    // backoff delay entirely.  Use "-1" as a sentinel ("don't touch runAt") so
+    // the Lua script only writes to the waiting set's score when a real runAt
+    // was supplied.
+    const runAt = patch.runAt !== undefined ? String(patch.runAt) : "-1";
+
     // Only send a real priority when it was explicitly included in the patch.
-    // Passing "0" as a default would overwrite the job's existing priority in
-    // the Lua script's ZADD call, silently demoting high-priority jobs.
     // The Lua script skips the ZADD when priority is the sentinel "-1".
     const priority  = patch.priority !== undefined ? String(patch.priority) : "-1";
 
@@ -157,20 +164,23 @@ export class RedisStorage implements IStorage {
     const strParts:  string[] = [];
     const numParts:  string[] = [];
     const nullParts: string[] = [];
+    const boolParts: string[] = [];
 
     for (const [key, val] of Object.entries(patch) as [string, unknown][]) {
-      // status and updatedAt are handled directly by the Lua script.
-      if (key === "status" || key === "updatedAt") continue;
+      // status, updatedAt, and runAt are handled directly by the Lua script.
+      if (key === "status" || key === "updatedAt" || key === "runAt") continue;
 
       if (val === null || val === undefined) {
         nullParts.push(key);
       } else if (typeof val === "number") {
         numParts.push(key, String(val));
       } else if (typeof val === "boolean") {
-        numParts.push(key, val ? "1" : "0");
+        // BUG FIX: booleans must be sent as the JSON literals "true"/"false",
+        // NOT as "1"/"0".  The Lua numeric pattern [%d%.%-]+ cannot match the
+        // stored JSON literals true/false, so bool patches were silently lost.
+        // The new boolFields ARGV in update-job.lua v5 handles this correctly.
+        boolParts.push(key, val ? "true" : "false");
       } else if (typeof val === "string") {
-        // The Lua script receives the raw string value (not JSON-encoded).
-        // RS cannot appear in any job string value, so this is safe.
         strParts.push(key, val);
       }
       // Composite fields (data, opts, result) are intentionally skipped —
@@ -191,6 +201,7 @@ export class RedisStorage implements IStorage {
         strParts.join(RS),
         numParts.join(RS),
         nullParts.join(RS),
+        boolParts.join(RS),   // ARGV[8] — new in update-job.lua v5
       ],
     });
   }

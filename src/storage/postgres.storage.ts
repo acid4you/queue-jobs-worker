@@ -156,13 +156,12 @@ export class PostgresStorage implements IStorage {
     // FOR UPDATE SKIP LOCKED ensures each row is claimed by exactly one worker
     // under concurrent multi-process access.
     //
-    // BUG FIX: the previous query used  SET payload = payload || jsonb_build_object(...)
-    // and then RETURNING j.payload — in PostgreSQL, RETURNING reflects the NEW
-    // row values after the UPDATE, so the merged payload is returned correctly.
-    // However, the merge was done with the $2 parameter cast as ::bigint which
-    // only works for the JSONB numeric value.  We now build the update object
-    // once in the SET clause and return it directly so the RETURNING value is
-    // always the fully-merged, post-UPDATE payload.
+    // BUG FIX: also update the `status` column so it stays in sync with the
+    // payload's status field — without this the scalar column and the JSONB
+    // payload diverged, which broke any query that filtered on the column
+    // (e.g. future list/count queries added by callers).
+    // We RETURNING the merged payload expression directly (not j.payload)
+    // to guarantee the returned value is always the fully post-UPDATE object.
     const { rows } = await p.query<{ payload: Job<TData, TResult> }>(
       `WITH claimed AS (
          SELECT id FROM qjw_jobs
@@ -183,7 +182,11 @@ export class PostgresStorage implements IStorage {
                        )
          FROM claimed
          WHERE j.queue_name = $1 AND j.id = claimed.id
-         RETURNING j.payload
+         RETURNING j.payload || jsonb_build_object(
+                     'status',      'active',
+                     'updatedAt',   $2::bigint,
+                     'processedAt', $2::bigint
+                   ) AS payload
        )
        SELECT payload FROM updated`,
       [queueName, now],

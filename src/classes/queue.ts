@@ -60,6 +60,9 @@ export class Queue<TData = unknown, TResult = unknown> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly _workers = new Set<{ close(): Promise<void> }>();
 
+  /** Guards against double-close. */
+  private _closed = false;
+
   constructor(
     name: string,
     client?: QueueClient,
@@ -201,10 +204,21 @@ export class Queue<TData = unknown, TResult = unknown> {
    *    in-flight jobs to finish before each worker resolves).
    * 2. Cancel all active cron schedules.
    *
+   * Idempotent — safe to call multiple times.
    * You do NOT need to call worker.close() separately — this handles it.
    */
   public async close(): Promise<void> {
+    // BUG FIX: guard against double-close. Without this flag a second call
+    // races through the worker set (already cleared) and re-cancels cron
+    // handles (no-op but misleading). More importantly it prevents any
+    // future _registerWorker calls on an already-closed queue from leaking.
+    if (this._closed) return;
+    this._closed = true;
+
     // Close all attached workers concurrently.
+    // worker.close() calls _unregisterWorker internally so the set shrinks
+    // as each promise resolves. We snapshot the set first to avoid iterating
+    // a live collection that is being mutated by concurrent close() calls.
     await Promise.all([...this._workers].map((w) => w.close()));
     this._workers.clear();
 

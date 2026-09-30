@@ -1,5 +1,5 @@
 --[[
-  update-job.lua  v4
+  update-job.lua  v5
   Atomically read, patch, and re-persist a job — entirely server-side.
 
   One Redis round-trip: GET + targeted string replacement + SET.
@@ -23,21 +23,28 @@
                        Empty string "" means no numeric fields to patch.
     [7]  nullFields  — RS-delimited field names to set to JSON null.
                        Empty string "" means no null fields.
+    [8]  boolFields  — RS-delimited "key\x1evalue" pairs for boolean fields.
+                       value is "true" or "false" (the JSON literal).
+                       Needed because booleans are stored as JSON true/false
+                       but cannot be matched by the numeric pattern [%d%.%-]+.
+                       Empty string "" means no boolean fields to patch.
 
   ── Replacement strategy ──────────────────────────────────────────────────────
-    String fields: we replace  "key":"<oldvalue>"  →  "key":"<newvalue>"
-      where <oldvalue> is matched with a pattern that handles embedded escape
-      sequences:  ([^"\\]|\\.)*   — any non-quote/non-backslash char, or a
-      backslash followed by any char (handles \", \\, \n, etc.).
+    String fields:  "key":"<oldvalue>"  →  "key":"<newvalue>"
+      <oldvalue> matched with ([^"\\]|\\.)*  (handles embedded escapes).
 
-    Numeric fields: we replace  "key":<oldnumber>  →  "key":<newvalue>
-      where <oldnumber> matches integers, decimals, and negatives.
+    Numeric fields: "key":<oldnumber>   →  "key":<newvalue>
+      <oldnumber> matches integers, decimals, and negatives: [%d%.%-]+
 
-    Null fields: we replace the current value (string, number, bool, null,
-      or nested object/array) → null.
-      We use a two-pass pattern that matches either a full JSON string value
-      ("([^"\\]|\\.)*") or a non-string scalar/token ([^,}]+), so nested
-      braces inside string values are never misinterpreted.
+    Boolean fields: "key":<true|false>  →  "key":<true|false>
+      BUG FIX (v5): the previous code sent booleans through numFields as "1"/"0"
+      but the existing JSON stores them as the literals true/false.  The numeric
+      pattern [%d%.%-]+ never matched those literals, so boolean patches were
+      silently dropped.  boolFields now carries the raw JSON literal ("true" /
+      "false") and uses an exact-word pattern instead.
+
+    Null fields: current value (string, number, bool, null, object/array) → null.
+      Two-branch pattern: full JSON-string value OR non-string scalar/token.
 
   ── Returns ───────────────────────────────────────────────────────────────────
     1 on success, 0 if the job does not exist.
@@ -54,6 +61,7 @@ local priority   = ARGV[4]   -- "-1" means "don't update priority"
 local strFields  = ARGV[5]
 local numFields  = ARGV[6]
 local nullFields = ARGV[7]
+local boolFields = ARGV[8] or ""   -- new in v5; default "" for back-compat
 
 -- RS = ASCII record separator (0x1E) used as our field delimiter.
 -- It never appears in job field names or values naturally.
@@ -79,6 +87,15 @@ local function escRepl(s)
   return s:gsub("%%", "%%%%")
 end
 
+-- Split an RS-delimited string into an array of parts.
+local function splitRS(s)
+  local parts = {}
+  for part in (s .. RS):gmatch("([^" .. RS .. "]*)" .. RS) do
+    parts[#parts + 1] = part
+  end
+  return parts
+end
+
 -- ── 2. Patch: status (always) ─────────────────────────────────────────────────
 -- status values are simple ASCII words with no special chars — plain replacement.
 raw = raw:gsub('"status":"[^"]*"', '"status":"' .. newStatus .. '"', 1)
@@ -87,15 +104,8 @@ raw = raw:gsub('"status":"[^"]*"', '"status":"' .. newStatus .. '"', 1)
 raw = raw:gsub('"updatedAt":[%d%.%-]+', '"updatedAt":' .. nowMs, 1)
 
 -- ── 4. Patch: string fields ───────────────────────────────────────────────────
--- Delimiter is RS (0x1E).  Format: "key\x1evalue\x1ekey\x1evalue..."
--- Values are the raw UTF-8 string (already JSON-escaped by the TypeScript caller).
 if strFields ~= "" then
-  -- Split on RS: iterate over key, value pairs.
-  local parts = {}
-  for part in (strFields .. RS):gmatch("([^" .. RS .. "]*)" .. RS) do
-    parts[#parts + 1] = part
-  end
-
+  local parts = splitRS(strFields)
   local i = 1
   while i < #parts do
     local key = parts[i]
@@ -119,13 +129,8 @@ if strFields ~= "" then
 end
 
 -- ── 5. Patch: numeric fields ──────────────────────────────────────────────────
--- Format same as strFields but values are numbers (integers or decimals).
 if numFields ~= "" then
-  local parts = {}
-  for part in (numFields .. RS):gmatch("([^" .. RS .. "]*)" .. RS) do
-    parts[#parts + 1] = part
-  end
-
+  local parts = splitRS(numFields)
   local i = 1
   while i < #parts do
     local key = parts[i]
@@ -145,20 +150,37 @@ if numFields ~= "" then
   end
 end
 
--- ── 6. Patch: null fields ─────────────────────────────────────────────────────
--- Format: "key\x1ekey\x1ekey..."
--- The fields we null (error, stacktrace, result, cron) can be strings, numbers,
--- booleans, or null.  We use a two-part pattern:
---   "([^"\\]|\\.)*"   — matches a JSON string value (handles embedded escapes)
---   [^,}]+            — matches a non-string scalar (number, bool, null)
--- This prevents the non-string branch from greedily consuming a nested } or
--- stopping too early inside a string that contains a comma.
-if nullFields ~= "" then
-  local parts = {}
-  for part in (nullFields .. RS):gmatch("([^" .. RS .. "]*)" .. RS) do
-    parts[#parts + 1] = part
-  end
+-- ── 6. Patch: boolean fields (new in v5) ─────────────────────────────────────
+-- BUG FIX: booleans are stored as JSON literals true/false but were previously
+-- sent through numFields as "1"/"0".  The numeric pattern [%d%.%-]+ never
+-- matched those literals so boolean patches were silently dropped.
+-- boolFields carries the raw JSON literal ("true" or "false") and we match
+-- the existing literal with an exact-word alternation pattern.
+if boolFields ~= "" then
+  local parts = splitRS(boolFields)
+  local i = 1
+  while i < #parts do
+    local key = parts[i]
+    local val = parts[i + 1]   -- "true" or "false"
+    i = i + 2
 
+    if key ~= "" then
+      -- Match either the literal true or false (both are possible stored values).
+      local pat  = '"' .. escPat(key) .. '":' .. '(true|false)'
+      local repl = '"' .. key .. '":' .. val
+
+      if raw:find('"' .. escPat(key) .. '":', 1, true) then
+        raw = raw:gsub(pat, repl, 1)
+      else
+        raw = raw:gsub('}$', ',"' .. key .. '":' .. val .. '}')
+      end
+    end
+  end
+end
+
+-- ── 7. Patch: null fields ─────────────────────────────────────────────────────
+if nullFields ~= "" then
+  local parts = splitRS(nullFields)
   for _, key in ipairs(parts) do
     if key ~= "" and raw:find('"' .. escPat(key) .. '":', 1, true) then
       -- Two-branch pattern: JSON string value OR non-string scalar.
@@ -168,15 +190,18 @@ if nullFields ~= "" then
   end
 end
 
--- ── 7. Persist updated JSON ───────────────────────────────────────────────────
+-- ── 8. Persist updated JSON ───────────────────────────────────────────────────
 redis.call("SET", hashKey, raw)
 
--- ── 8. Manage sorted-set membership ──────────────────────────────────────────
+-- ── 9. Manage sorted-set membership ──────────────────────────────────────────
 local jobId = hashKey:match("qjw:job:(.+)")
 
 if newStatus == "retrying" then
   -- Re-enter both sets so the job is re-claimable after the backoff delay.
-  redis.call("ZADD", waitingKey, runAt, jobId)
+  -- runAt "-1" is the sentinel meaning "no runAt in this patch" — skip ZADD.
+  if runAt ~= "-1" then
+    redis.call("ZADD", waitingKey, runAt, jobId)
+  end
   -- Only update the priority score when the caller explicitly sent one
   -- (priority ~= "-1").  Sending "-1" means "keep existing priority".
   if priority ~= "-1" then
@@ -189,11 +214,9 @@ elseif newStatus == "completed" or newStatus == "failed" then
   redis.call("ZREM", indexKey,   jobId)
 
 elseif newStatus == "active" then
-  -- BUG FIX (v4): only remove from the *waiting* set, NOT from the index.
-  -- Removing from the index caused list-jobs.lua to miss active jobs entirely
-  -- because list-jobs.lua iterates the index set to enumerate all jobs.
+  -- Only remove from the *waiting* set, NOT from the index.
+  -- The index tracks ALL jobs regardless of status so listJobs("active") works.
   redis.call("ZREM", waitingKey, jobId)
-  -- Leave the job in indexKey so listJobs("active") finds it.
 
 end
 
