@@ -1,7 +1,7 @@
 {
   "name": "queue-jobs-worker",
   "version": "2.0.0",
-  "description": "Reliable job queue and background worker system for Node.js with retries, concurrency, scheduling, failure recovery.",
+  "description": "Reliable background job queue and worker system for Node.js — supports in-memory, Redis, PostgreSQL, and MySQL with retries, concurrency, scheduling, and failure recovery.",
   "homepage": "https://github.com/rafidahmed870/queue-jobs-worker#readme",
   "bugs": {
     "url": "https://github.com/rafidahmed870/queue-jobs-worker/issues"
@@ -13,17 +13,47 @@
   "license": "MIT",
   "author": "Rafid Ahmed",
   "type": "module",
-  "main": "index.js",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "packageManager": "pnpm@11.22.0",
   "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean --out-dir dist",
+    "build:tsc": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "format": "prettier --write .",
-    "prepare": "husky"
+    "prepare": "husky",
+    "prepublishOnly": "pnpm build"
   },
   "engines": {
     "node": ">=18.0.0"
   },
+  "keywords": [
+    "queue",
+    "worker",
+    "job",
+    "background",
+    "task",
+    "scheduler",
+    "cron",
+    "redis",
+    "postgres",
+    "mysql",
+    "retry",
+    "concurrency"
+  ],
   "devDependencies": {
     "@types/node": "^26.6.1",
+    "@types/pg": "^8.23.1",
     "@typescript-eslint/eslint-plugin": "^8.70.0",
     "@typescript-eslint/parser": "^8.70.0",
     "eslint": "^10.10.0",
