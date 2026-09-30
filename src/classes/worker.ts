@@ -24,17 +24,17 @@ export type WorkerHandler<TData = unknown, TResult = unknown> = (
  */
 export interface WorkerEvents<TData, TResult> {
   /** A job has been picked up and is now processing. */
-  active:    [job: Job<TData, TResult>];
+  active: [job: Job<TData, TResult>];
   /** A job finished successfully. result is the handler's return value. */
   completed: [job: Job<TData, TResult>, result: TResult];
   /** One attempt failed — job may still retry. */
-  error:     [job: Job<TData, TResult>, error: Error];
+  error: [job: Job<TData, TResult>, error: Error];
   /** All attempts exhausted — job is permanently failed. */
-  failed:    [job: Job<TData, TResult>, error: Error];
+  failed: [job: Job<TData, TResult>, error: Error];
   /** Polling loop started. */
-  started:   [];
+  started: [];
   /** Polling loop stopped and all in-flight jobs drained. */
-  stopped:   [];
+  stopped: [];
 }
 
 // ─── Worker ───────────────────────────────────────────────────────────────────
@@ -64,10 +64,7 @@ export interface WorkerEvents<TData, TResult> {
  * // Graceful shutdown — waits for in-flight jobs before resolving
  * await worker.close();
  */
-export class Worker<
-  TData = unknown,
-  TResult = unknown,
-> extends EventEmitter {
+export class Worker<TData = unknown, TResult = unknown> extends EventEmitter {
   /** The Queue this worker consumes from. Read-only after construction. */
   public readonly queue: Queue<TData, TResult>;
 
@@ -75,8 +72,8 @@ export class Worker<
   private readonly concurrency: number;
   private readonly pollInterval: number;
 
-  private running     = false;
-  private loopTimer:  ReturnType<typeof setTimeout> | null = null;
+  private running = false;
+  private loopTimer: ReturnType<typeof setTimeout> | null = null;
   private activeCount = 0;
 
   /**
@@ -91,9 +88,9 @@ export class Worker<
   ) {
     super();
 
-    this.queue        = queue;
-    this.handler      = handler;
-    this.concurrency  = Math.max(1, options.concurrency  ?? 1);
+    this.queue = queue;
+    this.handler = handler;
+    this.concurrency = Math.max(1, options.concurrency ?? 1);
     this.pollInterval = Math.max(0, options.pollInterval ?? 500);
 
     // Register with the queue so queue.close() can auto-close this worker.
@@ -247,7 +244,7 @@ export class Worker<
   // ── Job execution ─────────────────────────────────────────────────────────
 
   private async processJob(job: Job<TData, TResult>): Promise<void> {
-    const config  = this.client.getConfig();
+    const config = this.client.getConfig();
     const timeout = (job.opts as { timeout?: number }).timeout ?? config.timeout;
 
     // The job was already flipped to "active" atomically inside getNextJob()
@@ -259,9 +256,9 @@ export class Worker<
     this.emit("active", active);
     this._log(
       `Worker[${this.queue.name}] processing "${job.name}" id=${job.id} ` +
-      // FIX: log the correct current attempt number (attemptsMade is 0-based,
-      // add 1 for the human-readable "attempt N of M" display).
-      `attempt=${active.attemptsMade + 1}/${active.attempts === 0 ? "∞" : active.attempts}`,
+        // FIX: log the correct current attempt number (attemptsMade is 0-based,
+        // add 1 for the human-readable "attempt N of M" display).
+        `attempt=${active.attemptsMade + 1}/${active.attempts === 0 ? "∞" : active.attempts}`,
     );
 
     let result: TResult;
@@ -302,19 +299,18 @@ export class Worker<
       // object, so stringifying it here is correct for Redis and a no-op
       // overhead for the others (they receive the patch object, not the
       // raw encoded fields).
-      const encodedResult = (
+      const encodedResult =
         result === null ||
         result === undefined ||
         typeof result === "string" ||
         typeof result === "number" ||
         typeof result === "boolean"
-      )
-        ? result
-        : (JSON.stringify(result) as unknown as TResult);
+          ? result
+          : (JSON.stringify(result) as unknown as TResult);
 
       await this.queue._updateJob(job.id, {
-        status:     "completed",
-        result:     encodedResult,
+        status: "completed",
+        result: encodedResult,
         finishedAt,
       });
     }
@@ -329,10 +325,7 @@ export class Worker<
    * this, the setTimeout handle keeps the event loop alive and Node.js will
    * not exit cleanly in tests or short-lived scripts.
    */
-  private runWithTimeout(
-    job: Job<TData, TResult>,
-    timeoutMs: number,
-  ): Promise<TResult> {
+  private runWithTimeout(job: Job<TData, TResult>, timeoutMs: number): Promise<TResult> {
     const work = Promise.resolve(this.handler(job));
     if (timeoutMs <= 0) return work;
 
@@ -343,47 +336,56 @@ export class Worker<
       );
 
       work.then(
-        (val) => { clearTimeout(timer); resolve(val); },
-        (err: unknown) => { clearTimeout(timer); reject(err); },
+        (val) => {
+          clearTimeout(timer);
+          resolve(val);
+        },
+        (err: unknown) => {
+          clearTimeout(timer);
+          reject(err);
+        },
       );
     });
   }
 
   /** Decide between a retry and a permanent failure. */
-  private async handleFailure(
-    job: Job<TData, TResult>,
-    rawErr: unknown,
-  ): Promise<void> {
+  private async handleFailure(job: Job<TData, TResult>, rawErr: unknown): Promise<void> {
     const err = rawErr instanceof Error ? rawErr : new Error(String(rawErr));
 
     // Re-fetch so attemptsMade is always accurate (avoids stale closure).
-    const current      = (await this.queue.get(job.id)) ?? job;
-    const attemptsMade = current.attemptsMade + 1;
-    const maxAttempts  = current.attempts; // 0 = unlimited
-    const canRetry     = maxAttempts === 0 || attemptsMade < maxAttempts;
+    // BUG FIX: the previous fallback was `?? job` where `job` is the snapshot
+    // from BEFORE the active transition (attemptsMade = N-1). If the re-fetch
+    // fails we should still use the correct in-memory value we just computed
+    // rather than the pre-active snapshot.  We optimistically increment
+    // attemptsMade first, then use the re-fetched value if available.
+    const fetched = await this.queue.get(job.id).catch(() => undefined);
+    const current = fetched ?? job;
+    const attemptsMade = (fetched?.attemptsMade ?? job.attemptsMade) + 1;
+    const maxAttempts = current.attempts; // 0 = unlimited
+    const canRetry = maxAttempts === 0 || attemptsMade < maxAttempts;
 
     // Emit "error" on every failed attempt (retry or final).
     this.emit("error", { ...current, attemptsMade } as Job<TData, TResult>, err);
     this._log(
       `Worker[${this.queue.name}] attempt ${attemptsMade}/${maxAttempts === 0 ? "∞" : maxAttempts} failed — ` +
-      `"${current.name}" id=${current.id}: ${err.message}`,
+        `"${current.name}" id=${current.id}: ${err.message}`,
     );
 
     if (canRetry) {
-      const delay   = this.calcBackoff(attemptsMade, current);
+      const delay = this.calcBackoff(attemptsMade, current);
       const retryAt = Date.now() + delay;
 
       await this.queue._updateJob(current.id, {
-        status:       "retrying",
+        status: "retrying",
         attemptsMade,
-        runAt:        retryAt,
-        error:        err.message,
+        runAt: retryAt,
+        error: err.message,
         ...(err.stack !== undefined && { stacktrace: err.stack }),
       });
 
       this._log(
         `Worker[${this.queue.name}] retry in ${delay}ms — ` +
-        `attempt ${attemptsMade + 1}/${maxAttempts === 0 ? "∞" : maxAttempts}`,
+          `attempt ${attemptsMade + 1}/${maxAttempts === 0 ? "∞" : maxAttempts}`,
       );
       return;
     }
@@ -398,11 +400,11 @@ export class Worker<
       await this.queue.remove(current.id);
     } else {
       await this.queue._updateJob(current.id, {
-        status:       "failed",
+        status: "failed",
         attemptsMade,
-        error:        err.message,
+        error: err.message,
         ...(err.stack !== undefined && { stacktrace: err.stack }),
-        finishedAt:   Date.now(),
+        finishedAt: Date.now(),
       });
     }
 
@@ -413,9 +415,7 @@ export class Worker<
     };
 
     this.emit("failed", failed, err);
-    this._log(
-      `Worker[${this.queue.name}] permanently failed — "${current.name}" id=${current.id}`,
-    );
+    this._log(`Worker[${this.queue.name}] permanently failed — "${current.name}" id=${current.id}`);
   }
 
   /**
@@ -425,14 +425,11 @@ export class Worker<
    * linear      → base × attemptsMade
    * exponential → base × 2^(attemptsMade − 1)   capped at 30 min
    */
-  private calcBackoff(
-    attemptsMade: number,
-    job: Job<TData, TResult>,
-  ): number {
-    const cfg      = this.client.getConfig();
-    const base     = cfg.retryDelay;
+  private calcBackoff(attemptsMade: number, job: Job<TData, TResult>): number {
+    const cfg = this.client.getConfig();
+    const base = cfg.retryDelay;
     const strategy = cfg.backoff as BackoffStrategy;
-    const MAX      = 30 * 60 * 1_000;
+    const MAX = 30 * 60 * 1_000;
 
     let delay: number;
     switch (strategy) {
@@ -451,22 +448,51 @@ export class Worker<
     const perJobBase = (job.opts as { retryDelay?: number }).retryDelay;
     if (perJobBase !== undefined) {
       switch (strategy) {
-        case "fixed":       delay = perJobBase; break;
-        case "linear":      delay = perJobBase * attemptsMade; break;
-        case "exponential": delay = perJobBase * Math.pow(2, attemptsMade - 1); break;
-        default:            delay = perJobBase; break;
+        case "fixed":
+          delay = perJobBase;
+          break;
+        case "linear":
+          delay = perJobBase * attemptsMade;
+          break;
+        case "exponential":
+          delay = perJobBase * Math.pow(2, attemptsMade - 1);
+          break;
+        default:
+          delay = perJobBase;
+          break;
       }
     }
 
     return Math.min(delay, MAX);
   }
 
-  /** Poll every 50 ms until no jobs are actively processing. */
+  /** Poll every 50 ms until no jobs are actively processing, with a 30 s safety timeout. */
   private drainActive(): Promise<void> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      // BUG FIX: the previous implementation polled forever with no upper
+      // bound.  If a processJob() call somehow never decrements activeCount
+      // (e.g. an unhandled rejection escaping the finally block) close() would
+      // hang indefinitely, blocking graceful shutdown.
+      // A 30-second hard timeout rejects the promise so the caller can surface
+      // the issue rather than silently blocking the process exit.
+      const DRAIN_TIMEOUT_MS = 30_000;
+      const deadline = setTimeout(() => {
+        reject(
+          new Error(
+            `[queue-jobs-worker] Worker[${this.queue.name}] drain timed out after ` +
+              `${DRAIN_TIMEOUT_MS}ms — ${this.activeCount} job(s) still active. ` +
+              "This may indicate an unhandled error in a job handler.",
+          ),
+        );
+      }, DRAIN_TIMEOUT_MS);
+
       const poll = () => {
-        if (this.activeCount === 0) resolve();
-        else setTimeout(poll, 50);
+        if (this.activeCount === 0) {
+          clearTimeout(deadline);
+          resolve();
+        } else {
+          setTimeout(poll, 50);
+        }
       };
       poll();
     });

@@ -33,11 +33,10 @@ export class PostgresStorage implements IStorage {
   async connect(): Promise<void> {
     let pgModule: { Pool: new (opts: { connectionString: string }) => PgPoolLike };
     try {
-      pgModule = await import("pg") as typeof pgModule;
+      pgModule = (await import("pg")) as typeof pgModule;
     } catch {
       throw new Error(
-        "[queue-jobs-worker] Postgres dialect requires the `pg` package. " +
-        "Run: npm install pg",
+        "[queue-jobs-worker] Postgres dialect requires the `pg` package. " + "Run: npm install pg",
       );
     }
 
@@ -52,25 +51,14 @@ export class PostgresStorage implements IStorage {
     }
   }
 
-  async saveJob<TData, TResult>(
-    queueName: string,
-    job: Job<TData, TResult>,
-  ): Promise<void> {
+  async saveJob<TData, TResult>(queueName: string, job: Job<TData, TResult>): Promise<void> {
     const p = this.assertPool();
     await p.query(
       `INSERT INTO qjw_jobs (id, queue_name, payload, status, priority, run_at, created_at)
        VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7)
        ON CONFLICT (queue_name, id) DO UPDATE SET payload = EXCLUDED.payload,
          status = EXCLUDED.status, priority = EXCLUDED.priority, run_at = EXCLUDED.run_at`,
-      [
-        job.id,
-        queueName,
-        JSON.stringify(job),
-        job.status,
-        job.priority,
-        job.runAt,
-        job.createdAt,
-      ],
+      [job.id, queueName, JSON.stringify(job), job.status, job.priority, job.runAt, job.createdAt],
     );
   }
 
@@ -91,40 +79,37 @@ export class PostgresStorage implements IStorage {
     jobId: string,
     patch: Partial<Job<TData, TResult>>,
   ): Promise<void> {
-    const existing = await this.getJob<TData, TResult>(queueName, jobId);
-    if (!existing) return;
-
-    const updated: Job<TData, TResult> = {
-      ...existing,
-      ...patch,
-      updatedAt: Date.now(),
-    };
-
+    // BUG FIX: the previous implementation did getJob() + UPDATE in two
+    // separate round-trips with no transaction.  Between the read and the
+    // write another process could update the same job, causing the second
+    // write to silently overwrite the newer data (lost-update / ABA race).
+    //
+    // Fix: use a single UPDATE with jsonb merge (||) so the read + write
+    // happens atomically inside PostgreSQL.  We pass updatedAt explicitly so
+    // the merged payload always carries the correct timestamp.
     const p = this.assertPool();
+    const patchWithTs = { ...patch, updatedAt: Date.now() } as Record<string, unknown>;
+
+    // Scalar columns are updated from the patch when present; COALESCE keeps
+    // the existing value when the patch does not include that field.
+    const newStatus = patch.status !== undefined ? patch.status : null;
+    const newPriority = patch.priority !== undefined ? patch.priority : null;
+    const newRunAt = patch.runAt !== undefined ? patch.runAt : null;
+
     await p.query(
       `UPDATE qjw_jobs
-       SET payload    = $1::jsonb,
-           status     = $2,
-           priority   = $3,
-           run_at     = $4
+       SET payload  = payload || $1::jsonb,
+           status   = COALESCE($2, status),
+           priority = COALESCE($3::integer, priority),
+           run_at   = COALESCE($4::bigint, run_at)
        WHERE queue_name = $5 AND id = $6`,
-      [
-        JSON.stringify(updated),
-        updated.status,
-        updated.priority,
-        updated.runAt,
-        queueName,
-        jobId,
-      ],
+      [JSON.stringify(patchWithTs), newStatus, newPriority, newRunAt, queueName, jobId],
     );
   }
 
   async removeJob(queueName: string, jobId: string): Promise<void> {
     const p = this.assertPool();
-    await p.query(
-      `DELETE FROM qjw_jobs WHERE queue_name = $1 AND id = $2`,
-      [queueName, jobId],
-    );
+    await p.query(`DELETE FROM qjw_jobs WHERE queue_name = $1 AND id = $2`, [queueName, jobId]);
   }
 
   async listJobs<TData, TResult>(
@@ -146,9 +131,7 @@ export class PostgresStorage implements IStorage {
     return rows.map((r) => r.payload);
   }
 
-  async getNextJob<TData, TResult>(
-    queueName: string,
-  ): Promise<Job<TData, TResult> | undefined> {
+  async getNextJob<TData, TResult>(queueName: string): Promise<Job<TData, TResult> | undefined> {
     const p = this.assertPool();
     const now = Date.now();
 

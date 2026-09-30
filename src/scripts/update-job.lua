@@ -12,7 +12,8 @@
   ── ARGV ──────────────────────────────────────────────────────────────────────
     [1]  newStatus   — target status string (always patched)
     [2]  nowMs       — current Unix timestamp ms (always written as updatedAt)
-    [3]  runAt       — runAt ms for "retrying" re-queue, or "0"
+    [3]  runAt       — runAt ms for "retrying" re-queue, or "-1" as sentinel
+                       meaning "do not touch runAt / skip ZADD waitingKey".
     [4]  priority    — job priority integer used when re-queuing to index set,
                        or "-1" as sentinel meaning "do not update priority".
     [5]  strFields   — RS-delimited "key\x1evalue" pairs for string fields.

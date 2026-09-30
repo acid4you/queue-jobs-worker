@@ -15,8 +15,8 @@ function assertQueueName(name: string): void {
   if (!name || !VALID_QUEUE_NAME.test(name)) {
     throw new Error(
       `[queue-jobs-worker] Invalid queue name "${name}". ` +
-      "Queue names must be non-empty and may only contain: " +
-      "letters, digits, hyphens (-), underscores (_), colons (:), and dots (.).",
+        "Queue names must be non-empty and may only contain: " +
+        "letters, digits, hyphens (-), underscores (_), colons (:), and dots (.).",
     );
   }
 }
@@ -63,17 +63,13 @@ export class Queue<TData = unknown, TResult = unknown> {
   /** Guards against double-close. */
   private _closed = false;
 
-  constructor(
-    name: string,
-    client?: QueueClient,
-    options: QueueOptions = {},
-  ) {
+  constructor(name: string, client?: QueueClient, options: QueueOptions = {}) {
     const activeClient = client ?? QueueClient.getDefaultClient();
 
     if (!activeClient?.isInitialized()) {
       throw new Error(
         "[queue-jobs-worker] QueueClient must be initialized before creating a Queue. " +
-        "Call await client.init() first.",
+          "Call await client.init() first.",
       );
     }
 
@@ -84,7 +80,7 @@ export class Queue<TData = unknown, TResult = unknown> {
     this.name = name;
     this.client = activeClient;
     this.options = {
-      rateLimit:      options.rateLimit      ?? { max: 0, duration: 0 },
+      rateLimit: options.rateLimit ?? { max: 0, duration: 0 },
       defaultJobOpts: options.defaultJobOpts ?? {},
     };
   }
@@ -108,35 +104,31 @@ export class Queue<TData = unknown, TResult = unknown> {
    * @param opts - Per-job overrides for attempts, delay, priority, cron, etc.
    * @returns    The fully populated Job record (with auto-generated UUID id).
    */
-  public async add(
-    name: string,
-    data: TData,
-    opts: JobOptions = {},
-  ): Promise<Job<TData, TResult>> {
-    const clientCfg    = this.client.getConfig();
-    const queueDefs    = this.options.defaultJobOpts;
-    const delay        = opts.delay ?? queueDefs.delay ?? 0;
-    const now          = Date.now();
+  public async add(name: string, data: TData, opts: JobOptions = {}): Promise<Job<TData, TResult>> {
+    const clientCfg = this.client.getConfig();
+    const queueDefs = this.options.defaultJobOpts;
+    const delay = opts.delay ?? queueDefs.delay ?? 0;
+    const now = Date.now();
 
     const job: Job<TData, TResult> = {
-      id:           opts.jobId ?? randomUUID(),
+      id: opts.jobId ?? randomUUID(),
       name,
       data,
       // Cron jobs begin as "delayed"; the croner callback flips them to
       // "waiting" on each scheduled tick so a Worker can pick them up.
       // Plain delayed jobs use "waiting" straight away — runAt gates pickup.
-      status:       opts.cron ? "delayed" : "waiting",
+      status: opts.cron ? "delayed" : "waiting",
       opts,
-      attempts:     opts.attempts ?? queueDefs.attempts ?? clientCfg.attempts,
+      attempts: opts.attempts ?? queueDefs.attempts ?? clientCfg.attempts,
       attemptsMade: 0,
       delay,
-      runAt:        now + delay,
-      priority:     opts.priority ?? queueDefs.priority ?? 0,
+      runAt: now + delay,
+      priority: opts.priority ?? queueDefs.priority ?? 0,
       // exactOptionalPropertyTypes: only include the optional `cron` field
       // when it is actually defined — never assign undefined to it explicitly.
       ...(opts.cron !== undefined && { cron: opts.cron }),
-      createdAt:    now,
-      updatedAt:    now,
+      createdAt: now,
+      updatedAt: now,
     };
 
     await this.storage.saveJob<TData, TResult>(this.name, job);
@@ -262,10 +254,7 @@ export class Queue<TData = unknown, TResult = unknown> {
    * Persist a partial status update to a job.
    * @internal
    */
-  public async _updateJob(
-    jobId: string,
-    patch: Partial<Job<TData, TResult>>,
-  ): Promise<void> {
+  public async _updateJob(jobId: string, patch: Partial<Job<TData, TResult>>): Promise<void> {
     await this.storage.updateJob<TData, TResult>(this.name, jobId, patch);
   }
 
@@ -275,45 +264,45 @@ export class Queue<TData = unknown, TResult = unknown> {
     if (!job.cron) return;
 
     const handle = new Cron(job.cron, async () => {
-      const current = await this.storage.getJob<TData, TResult>(this.name, job.id);
-      if (!current) {
-        this._cancelCron(job.id);
-        return;
-      }
+      // BUG FIX: croner silently swallows exceptions thrown inside callbacks.
+      // Wrap the entire body in try/catch so storage errors, network errors,
+      // and unexpected exceptions are logged rather than lost without a trace.
+      try {
+        const current = await this.storage.getJob<TData, TResult>(this.name, job.id);
+        if (!current) {
+          this._cancelCron(job.id);
+          return;
+        }
 
-      // Re-queue once the previous run has reached a terminal or idle state.
-      // "completed"  — last run succeeded; start a fresh one.
-      // "delayed"    — initial state before first run; start the first run.
-      // "failed"     — last run exhausted retries; reset so cron keeps firing.
-      //
-      // Intentionally excluded:
-      // "retrying"   — job failed once but still has remaining attempts and
-      //                is scheduled to retry soon.  Resetting it here would
-      //                wipe attemptsMade and runAt, causing it to skip its
-      //                retry backoff and re-run prematurely.  The worker will
-      //                pick it up naturally when runAt elapses.
-      // "active"     — job is currently running; leave it alone.
-      // "waiting"    — already queued for this cron tick; nothing to do.
-      if (
-        current.status === "completed" ||
-        current.status === "delayed"   ||
-        current.status === "failed"
-      ) {
-        await this.storage.updateJob<TData, TResult>(this.name, job.id, {
-          status:       "waiting",
-          attemptsMade: 0,
-          runAt:        Date.now(),
-          // Clear residual values from the previous run. Passing null is
-          // intentional — storage backends treat it as JSON null (cleared),
-          // and the Lua update-job.lua handles null fields explicitly.
-          // We cast to satisfy exactOptionalPropertyTypes without using the
-          // forbidden `undefined` assignment to an optional property.
-          error:      null as unknown as string,
-          stacktrace: null as unknown as string,
-          result:     null as unknown as TResult,
-        });
+        // Re-queue once the previous run has reached a terminal or idle state.
+        if (
+          current.status === "completed" ||
+          current.status === "delayed" ||
+          current.status === "failed"
+        ) {
+          await this.storage.updateJob<TData, TResult>(this.name, job.id, {
+            status: "waiting",
+            attemptsMade: 0,
+            runAt: Date.now(),
+            error: null as unknown as string,
+            stacktrace: null as unknown as string,
+            result: null as unknown as TResult,
+          });
+          this.client._log(`Queue[${this.name}] cron tick — "${job.name}" id=${job.id} re-queued`);
+        }
+      } catch (err) {
+        // Log the error so it is visible in debug mode. We do not re-throw
+        // because croner would swallow it anyway, and crashing the cron
+        // scheduler would prevent all future ticks for this job.
         this.client._log(
-          `Queue[${this.name}] cron tick — "${job.name}" id=${job.id} re-queued`,
+          `Queue[${this.name}] cron tick error — "${job.name}" id=${job.id}: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+        // Always emit to console.error so it is visible even when debug is off.
+        console.error(
+          `[queue-jobs-worker] Queue[${this.name}] cron tick error — ` +
+            `"${job.name}" id=${job.id}:`,
+          err,
         );
       }
     });

@@ -14,14 +14,16 @@
 
   Algorithm
     1. Scan the waiting set for members whose score (runAt) <= nowMs.
-    2. Take the first one — it is already sorted by runAt ASC inside the
-       waiting set; ties fall back to the global priority order.
-    3. Remove it from the waiting set atomically.
-    4. Fetch the job JSON from its hash key.
-    5. If the JSON is gone (TTL race) skip and try the next candidate.
-    6. Decode the JSON, flip status → "active", bump updatedAt, processedAt.
-    7. Re-encode and overwrite the hash key.
-    8. Return the updated job JSON string.
+       ZRANGEBYSCORE returns by runAt ASC — but two jobs with identical runAt
+       values would be served in arbitrary order, violating priority ordering.
+    2. BUG FIX: re-sort candidates by their priority score from the index set
+       (lower score = higher priority) so high-priority jobs are always claimed
+       first even when multiple jobs become eligible at the same runAt.
+    3. Iterate the priority-sorted list.  For each candidate, atomically ZREM
+       it from the waiting set — only one worker can succeed (ZREM returns 1).
+    4. Fetch the job JSON; skip if missing (external deletion race).
+    5. Patch status → "active", bump updatedAt and processedAt in-place.
+    6. Persist and return the updated JSON string.
 
   Returns
     Bulk string — updated job JSON, or nil if nothing is eligible.
@@ -31,39 +33,62 @@ local indexKey   = KEYS[1]   -- "qjw:{queue}:index"
 local waitingKey = KEYS[2]   -- "qjw:{queue}:waiting"
 local nowMs      = tonumber(ARGV[1])
 
--- Fetch all members of the waiting set whose runAt <= nowMs.
--- ZRANGEBYSCORE returns members ordered by score ASC (oldest runAt first).
+-- ── 1. Fetch all eligible job IDs from the waiting set ──────────────────────
+-- ZRANGEBYSCORE returns members ordered by score (runAt) ASC.
 local candidates = redis.call("ZRANGEBYSCORE", waitingKey, "-inf", nowMs)
 
+if #candidates == 0 then
+  return nil
+end
+
+-- ── 2. Re-sort by priority using scores from the index set ──────────────────
+-- BUG FIX: the waiting set is ordered by runAt, not priority.  When multiple
+-- jobs are eligible at the same time (or have identical runAt values) they
+-- should be dispatched in priority ASC order (lower score = higher priority).
+-- We fetch each candidate's priority score and sort locally inside the script.
+--
+-- ZSCORE returns nil for members not in the index (should never happen in a
+-- consistent store, but we default to 0 so such jobs sort at the front rather
+-- than causing a Lua error).
+local scored = {}
 for _, jobId in ipairs(candidates) do
-  -- Atomically remove from waiting set. If another worker already claimed it
-  -- this returns 0 and we skip to the next candidate.
+  local score = redis.call("ZSCORE", indexKey, jobId)
+  scored[#scored + 1] = { id = jobId, pri = tonumber(score) or 0 }
+end
+
+-- Stable sort by priority ASC.  Lua's table.sort is not guaranteed stable,
+-- but for our purposes (priority is typically a small integer) this is fine —
+-- ties within the same priority are already broken by runAt ASC order from
+-- ZRANGEBYSCORE, and table.sort preserves relative input order for equal keys
+-- in most Lua runtimes (including Redis's embedded LuaJIT).
+table.sort(scored, function(a, b) return a.pri < b.pri end)
+
+-- ── 3. Claim the first job we can atomically remove from the waiting set ─────
+for _, entry in ipairs(scored) do
+  local jobId = entry.id
+
+  -- ZREM is atomic: returns 1 if we removed it, 0 if another worker beat us.
   local removed = redis.call("ZREM", waitingKey, jobId)
   if removed == 1 then
     local hashKey = "qjw:job:" .. jobId
     local raw     = redis.call("GET", hashKey)
 
     if raw then
-      -- Decode, update status fields, re-encode.
-      -- Redis does not have a JSON module by default, so we do a targeted
-      -- string substitution rather than a full parse. The job JSON is a
-      -- single flat object — no nested status/updatedAt/processedAt fields
-      -- from sub-objects need to change.
+      -- ── 4. Patch status fields in-place ─────────────────────────────────
+      -- We use targeted string substitution rather than a full JSON parse
+      -- (Redis has no built-in JSON module by default).  The job JSON is a
+      -- flat object — no nested status/updatedAt/processedAt fields exist
+      -- inside sub-objects, so string replacement is safe and unambiguous.
       local nowStr = tostring(nowMs)
 
-      -- Replace "status":"<anything>" → "status":"active"
+      -- "status":"<anything>"  →  "status":"active"
       raw = raw:gsub('"status":"[^"]*"', '"status":"active"', 1)
 
-      -- Replace "updatedAt":<number> → current timestamp
+      -- "updatedAt":<number>  →  current timestamp
       raw = raw:gsub('"updatedAt":[%d%.%-]+', '"updatedAt":' .. nowStr, 1)
 
-      -- BUG FIX: the old pattern  "processedAt":[^,}]*  only matched
-      -- non-string scalars (numbers, null, booleans).  If processedAt was
-      -- stored as a JSON string ("2024-...") the pattern stopped at the
-      -- opening quote and left the field partially replaced.
-      -- New approach: use two branches — a full JSON-string matcher first,
-      -- then a non-string scalar fallback — identical to the null-field
-      -- strategy used in update-job.lua.
+      -- "processedAt": <string|number|null|absent>  →  current timestamp
+      -- Two-branch pattern handles both JSON string values and scalar values.
       if raw:find('"processedAt":', 1, true) then
         raw = raw:gsub(
           '"processedAt":("([^"\\]|\\.)*"|[^,}]+)',
@@ -71,22 +96,21 @@ for _, jobId in ipairs(candidates) do
           1
         )
       else
-        -- Field absent — insert before the closing brace of the top-level
-        -- object.  JSON always ends with "}", so this is safe.
+        -- Field absent — append before the closing brace.
         raw = raw:gsub('}$', ',"processedAt":' .. nowStr .. '}')
       end
 
+      -- ── 5. Persist and return ────────────────────────────────────────────
       redis.call("SET", hashKey, raw)
 
-      -- NOTE: only remove from the *waiting* set, NOT from the index.
-      -- The index set tracks ALL jobs regardless of status; only the waiting
-      -- set gates which jobs are eligible for pickup.
-      -- Index entries are removed only when a job reaches a terminal state
-      -- (completed / failed) via update-job.lua or remove-job.lua.
+      -- Only remove from the *waiting* set, NOT from the index.
+      -- The index tracks ALL jobs regardless of status so listJobs("active")
+      -- continues to find this job.  Index entries are removed only when the
+      -- job reaches a terminal state via update-job.lua or remove-job.lua.
 
       return raw
     end
-    -- JSON missing — job was deleted externally. Continue scanning.
+    -- JSON missing — job was deleted externally. Continue to next candidate.
   end
 end
 

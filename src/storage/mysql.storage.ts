@@ -32,14 +32,18 @@ export class MysqlStorage implements IStorage {
 
   async connect(): Promise<void> {
     let mysql2Module: {
-      createPool: (opts: { uri: string; waitForConnections: boolean; connectionLimit: number }) => MysqlPoolLike;
+      createPool: (opts: {
+        uri: string;
+        waitForConnections: boolean;
+        connectionLimit: number;
+      }) => MysqlPoolLike;
     };
     try {
-      mysql2Module = await import("mysql2/promise") as typeof mysql2Module;
+      mysql2Module = (await import("mysql2/promise")) as typeof mysql2Module;
     } catch {
       throw new Error(
         "[queue-jobs-worker] MySQL dialect requires the `mysql2` package. " +
-        "Run: npm install mysql2",
+          "Run: npm install mysql2",
       );
     }
 
@@ -59,10 +63,7 @@ export class MysqlStorage implements IStorage {
     }
   }
 
-  async saveJob<TData, TResult>(
-    queueName: string,
-    job: Job<TData, TResult>,
-  ): Promise<void> {
+  async saveJob<TData, TResult>(queueName: string, job: Job<TData, TResult>): Promise<void> {
     const p = this.assertPool();
     await p.execute(
       `INSERT INTO qjw_jobs (id, queue_name, payload, status, priority, run_at, created_at)
@@ -72,15 +73,7 @@ export class MysqlStorage implements IStorage {
          status     = VALUES(status),
          priority   = VALUES(priority),
          run_at     = VALUES(run_at)`,
-      [
-        job.id,
-        queueName,
-        JSON.stringify(job),
-        job.status,
-        job.priority,
-        job.runAt,
-        job.createdAt,
-      ],
+      [job.id, queueName, JSON.stringify(job), job.status, job.priority, job.runAt, job.createdAt],
     );
   }
 
@@ -98,9 +91,7 @@ export class MysqlStorage implements IStorage {
     if (!row) return undefined;
 
     // mysql2 parses JSON columns automatically; handle both cases.
-    const raw = typeof row.payload === "string"
-      ? JSON.parse(row.payload)
-      : row.payload;
+    const raw = typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload;
     return raw as Job<TData, TResult>;
   }
 
@@ -109,40 +100,41 @@ export class MysqlStorage implements IStorage {
     jobId: string,
     patch: Partial<Job<TData, TResult>>,
   ): Promise<void> {
-    const existing = await this.getJob<TData, TResult>(queueName, jobId);
-    if (!existing) return;
-
-    const updated: Job<TData, TResult> = {
-      ...existing,
-      ...patch,
-      updatedAt: Date.now(),
-    };
-
+    // BUG FIX: the previous implementation did getJob() + UPDATE in two
+    // separate round-trips with no transaction.  Between the read and the
+    // write another process could update the same job, and our write would
+    // silently overwrite the newer data (lost-update / ABA race).
+    //
+    // Fix: use a single UPDATE with JSON_MERGE_PATCH so the merge happens
+    // atomically inside MySQL.  We pass updatedAt explicitly so the server
+    // always records the correct timestamp regardless of clock skew.
     const p = this.assertPool();
+
+    // Build a minimal patch object (only the fields actually changing) and
+    // add updatedAt so the merged payload stays consistent.
+    const patchWithTs = { ...patch, updatedAt: Date.now() } as Record<string, unknown>;
+
+    // JSON_MERGE_PATCH(col, ?) merges our patch into the stored JSONB object
+    // atomically inside MySQL.  Scalar columns (status, priority, run_at) are
+    // updated from the patch when present, otherwise kept as-is.
+    const newStatus = patch.status !== undefined ? patch.status : null;
+    const newPriority = patch.priority !== undefined ? patch.priority : null;
+    const newRunAt = patch.runAt !== undefined ? patch.runAt : null;
+
     await p.execute(
       `UPDATE qjw_jobs
-       SET payload    = ?,
-           status     = ?,
-           priority   = ?,
-           run_at     = ?
+       SET payload   = JSON_MERGE_PATCH(payload, ?),
+           status    = COALESCE(?, status),
+           priority  = COALESCE(?, priority),
+           run_at    = COALESCE(?, run_at)
        WHERE queue_name = ? AND id = ?`,
-      [
-        JSON.stringify(updated),
-        updated.status,
-        updated.priority,
-        updated.runAt,
-        queueName,
-        jobId,
-      ],
+      [JSON.stringify(patchWithTs), newStatus, newPriority, newRunAt, queueName, jobId],
     );
   }
 
   async removeJob(queueName: string, jobId: string): Promise<void> {
     const p = this.assertPool();
-    await p.execute(
-      `DELETE FROM qjw_jobs WHERE queue_name = ? AND id = ?`,
-      [queueName, jobId],
-    );
+    await p.execute(`DELETE FROM qjw_jobs WHERE queue_name = ? AND id = ?`, [queueName, jobId]);
   }
 
   async listJobs<TData, TResult>(
@@ -167,9 +159,7 @@ export class MysqlStorage implements IStorage {
     });
   }
 
-  async getNextJob<TData, TResult>(
-    queueName: string,
-  ): Promise<Job<TData, TResult> | undefined> {
+  async getNextJob<TData, TResult>(queueName: string): Promise<Job<TData, TResult> | undefined> {
     const p = this.assertPool();
     const now = Date.now();
 
@@ -178,7 +168,11 @@ export class MysqlStorage implements IStorage {
     // mysql2 promise pool gives us a connection we can BEGIN/COMMIT on.
     const conn = await p.getConnection();
     try {
-      await conn.execute("START TRANSACTION");
+      // BUG FIX: conn.execute("START TRANSACTION") works at the SQL level but
+      // bypasses mysql2's internal transaction-state tracking, which can confuse
+      // pool health checks and connection-reuse logic.  Use the dedicated API
+      // method instead so mysql2 knows the connection is in a transaction.
+      await conn.beginTransaction();
 
       const [rows] = await conn.execute<MysqlRow[]>(
         `SELECT id, payload FROM qjw_jobs
@@ -193,21 +187,19 @@ export class MysqlStorage implements IStorage {
 
       const row = (rows as MysqlRow[])[0];
       if (!row) {
-        await conn.execute("COMMIT");
+        await conn.commit();
         return undefined;
       }
 
       const jobId = row.id as string;
-      const raw   = typeof row.payload === "string"
-        ? JSON.parse(row.payload)
-        : row.payload;
-      const job   = raw as Job<TData, TResult>;
+      const raw = typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload;
+      const job = raw as Job<TData, TResult>;
 
       // Atomically flip status to active in the same transaction.
       const updated: Job<TData, TResult> = {
         ...job,
-        status:      "active",
-        updatedAt:   now,
+        status: "active",
+        updatedAt: now,
         processedAt: now,
       };
 
@@ -218,10 +210,10 @@ export class MysqlStorage implements IStorage {
         [JSON.stringify(updated), queueName, jobId],
       );
 
-      await conn.execute("COMMIT");
+      await conn.commit();
       return updated;
     } catch (err) {
-      await conn.execute("ROLLBACK").catch(() => undefined);
+      await conn.rollback().catch(() => undefined);
       throw err;
     } finally {
       conn.release();
@@ -285,6 +277,9 @@ interface MysqlRow {
 
 interface MysqlConnectionLike {
   execute<T = unknown>(sql: string, params?: unknown[]): Promise<[T, unknown]>;
+  beginTransaction(): Promise<void>;
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
   release(): void;
 }
 
