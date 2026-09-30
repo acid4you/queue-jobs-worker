@@ -26,7 +26,7 @@
   ],
   "packageManager": "pnpm@11.22.0",
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --clean --out-dir dist",
+    "build": "tsup",
     "build:tsc": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
