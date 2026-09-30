@@ -8,13 +8,7 @@
  * failed    — Job exhausted all retry attempts and is permanently failed.
  * retrying  — Job failed once but still has remaining attempts; waiting for next retry.
  */
-export type JobStatus =
-  | "waiting"
-  | "delayed"
-  | "active"
-  | "completed"
-  | "failed"
-  | "retrying";
+export type JobStatus = "waiting" | "delayed" | "active" | "completed" | "failed" | "retrying";
 
 /**
  * Options you can pass when adding a job to the queue.

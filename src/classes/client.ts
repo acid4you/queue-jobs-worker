@@ -74,7 +74,7 @@ export class QueueClient {
     if (this._closed) {
       throw new Error(
         "[queue-jobs-worker] QueueClient has been closed and cannot be re-initialized. " +
-        "Create a new instance instead.",
+          "Create a new instance instead.",
       );
     }
 
@@ -101,9 +101,7 @@ export class QueueClient {
   public async close(): Promise<void> {
     if (this._closed) return; // idempotent — second call is a no-op
     if (!this._initialized) {
-      throw new Error(
-        "[queue-jobs-worker] Cannot close a QueueClient that was never initialized.",
-      );
+      throw new Error("[queue-jobs-worker] Cannot close a QueueClient that was never initialized.");
     }
 
     await this._storage!.disconnect();
@@ -182,7 +180,7 @@ export class QueueClient {
     if (!this._storage || !this._initialized) {
       throw new Error(
         "[queue-jobs-worker] QueueClient must be initialized before accessing storage. " +
-        "Did you forget to call await client.init()?",
+          "Did you forget to call await client.init()?",
       );
     }
     return this._storage;

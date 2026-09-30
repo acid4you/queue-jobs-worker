@@ -11,7 +11,7 @@ import { Worker } from "../src/classes/worker.js";
 function waitFor(
   predicate: () => boolean | Promise<boolean>,
   timeoutMs = 15_000,
-  interval  = 30,
+  interval = 30,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const start = Date.now();
@@ -41,7 +41,7 @@ describe("Backoff — fixed", () => {
 
     let calls = 0;
     const timestamps: number[] = [];
-    const queue  = new Queue("fixed-q", client);
+    const queue = new Queue("fixed-q", client);
     const worker = new Worker(queue, async () => {
       timestamps.push(Date.now());
       if (++calls < 3) throw new Error("retry");
@@ -75,7 +75,7 @@ describe("Backoff — exponential", () => {
 
     let calls = 0;
     const timestamps: number[] = [];
-    const queue  = new Queue("exp-q", client);
+    const queue = new Queue("exp-q", client);
     const worker = new Worker(queue, async () => {
       timestamps.push(Date.now());
       if (++calls < 3) throw new Error("retry");
@@ -106,7 +106,7 @@ describe("Backoff — linear", () => {
 
     let calls = 0;
     const timestamps: number[] = [];
-    const queue  = new Queue("lin-q", client);
+    const queue = new Queue("lin-q", client);
     const worker = new Worker(queue, async () => {
       timestamps.push(Date.now());
       if (++calls < 3) throw new Error("retry");

@@ -17,10 +17,7 @@ import { MysqlStorage } from "../storage/mysql.storage.js";
  * @throws If a non-memory dialect is requested without a connectionString.
  * @throws If an unknown dialect is provided.
  */
-export function resolveStorage(
-  dialect: StorageDialect,
-  connectionString?: string,
-): IStorage {
+export function resolveStorage(dialect: StorageDialect, connectionString?: string): IStorage {
   switch (dialect) {
     case "memory":
       return new MemoryStorage();
@@ -44,7 +41,7 @@ export function resolveStorage(
       const _unreachable: never = dialect;
       throw new Error(
         `[queue-jobs-worker] Unknown storage dialect: "${String(_unreachable)}". ` +
-        `Valid options are: "memory", "redis", "postgres", "mysql".`,
+          `Valid options are: "memory", "redis", "postgres", "mysql".`,
       );
     }
   }
@@ -57,16 +54,20 @@ function assertConnectionString(
   if (!connectionString) {
     throw new Error(
       `[queue-jobs-worker] Dialect "${dialect}" requires a connectionString. ` +
-      `Example: { dialect: "${dialect}", connectionString: "${exampleDsn(dialect)}" }`,
+        `Example: { dialect: "${dialect}", connectionString: "${exampleDsn(dialect)}" }`,
     );
   }
 }
 
 function exampleDsn(dialect: StorageDialect): string {
   switch (dialect) {
-    case "redis":    return "redis://localhost:6379";
-    case "postgres": return "postgresql://user:pass@localhost:5432/mydb";
-    case "mysql":    return "mysql://user:pass@localhost:3306/mydb";
-    default:         return "";
+    case "redis":
+      return "redis://localhost:6379";
+    case "postgres":
+      return "postgresql://user:pass@localhost:5432/mydb";
+    case "mysql":
+      return "mysql://user:pass@localhost:3306/mydb";
+    default:
+      return "";
   }
 }

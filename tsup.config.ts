@@ -23,10 +23,7 @@ export default defineConfig({
 
     await Promise.all(
       luaScripts.map((name) =>
-        copyFile(
-          join("src", "scripts", `${name}.lua`),
-          join(destDir, `${name}.lua`),
-        ),
+        copyFile(join("src", "scripts", `${name}.lua`), join(destDir, `${name}.lua`)),
       ),
     );
 

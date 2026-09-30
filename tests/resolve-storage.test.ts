@@ -45,8 +45,6 @@ describe("resolveStorage", () => {
   });
 
   it("throws a descriptive error for an unknown dialect", () => {
-    expect(() =>
-      resolveStorage("unknown" as "memory"),
-    ).toThrow("Unknown storage dialect");
+    expect(() => resolveStorage("unknown" as "memory")).toThrow("Unknown storage dialect");
   });
 });

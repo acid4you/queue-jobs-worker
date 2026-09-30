@@ -12,7 +12,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 function waitFor(
   predicate: () => boolean | Promise<boolean>,
   timeoutMs = 8_000,
-  interval  = 20,
+  interval = 20,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const start = Date.now();
@@ -77,14 +77,20 @@ describe("Integration — separation of concerns", () => {
 
   it("multiple workers can consume from the same queue concurrently", async () => {
     const queue = new Queue("shared", client);
-    let total   = 0;
+    let total = 0;
 
-    const w1 = new Worker(queue, async () => { await sleep(20); total++; return "w1"; });
-    const w2 = new Worker(queue, async () => { await sleep(20); total++; return "w2"; });
+    const w1 = new Worker(queue, async () => {
+      await sleep(20);
+      total++;
+      return "w1";
+    });
+    const w2 = new Worker(queue, async () => {
+      await sleep(20);
+      total++;
+      return "w2";
+    });
 
-    await Promise.all(
-      Array.from({ length: 4 }, (_, i) => queue.add(`job-${i}`, {})),
-    );
+    await Promise.all(Array.from({ length: 4 }, (_, i) => queue.add(`job-${i}`, {})));
 
     w1.start();
     w2.start();
@@ -103,7 +109,7 @@ describe("Integration — separation of concerns", () => {
 describe("Integration — Express-style bootstrap", () => {
   it("init → add → process → close full lifecycle", async () => {
     const results: string[] = [];
-    const queue  = new Queue<{ email: string }>("express-mailer", client);
+    const queue = new Queue<{ email: string }>("express-mailer", client);
     const worker = new Worker(queue, async (job) => {
       results.push(job.data.email);
       return "sent";
@@ -144,7 +150,7 @@ describe("Integration — NestJS module lifecycle", () => {
       async onModuleInit() {
         this.nestClient = new QueueClient({ dialect: "memory" });
         await this.nestClient.init();
-        this.queue  = new Queue("nest-emails", this.nestClient);
+        this.queue = new Queue("nest-emails", this.nestClient);
         this.worker = new Worker(this.queue, async (job) => {
           this.processed.push(job.data.to);
           return "delivered";
@@ -175,7 +181,7 @@ describe("Integration — NestJS module lifecycle", () => {
 describe("Integration — implicit default client", () => {
   it("Queue uses the default client automatically", async () => {
     // client was init'd in beforeEach → it is the default.
-    const queue  = new Queue("implicit"); // no client arg
+    const queue = new Queue("implicit"); // no client arg
     const worker = new Worker(queue, async (job) => `done:${job.name}`);
     worker.start();
 
@@ -191,26 +197,32 @@ describe("Integration — implicit default client", () => {
 
 describe("Integration — multiple queues", () => {
   it("two independent queues process separately", async () => {
-    const emailResults:  string[] = [];
+    const emailResults: string[] = [];
     const reportResults: number[] = [];
 
-    const emailQueue  = new Queue<{ to: string }>("emails",  client);
+    const emailQueue = new Queue<{ to: string }>("emails", client);
     const reportQueue = new Queue<{ id: number }>("reports", client);
 
-    const emailWorker  = new Worker(emailQueue,  async (j) => { emailResults.push(j.data.to); return "sent"; });
-    const reportWorker = new Worker(reportQueue, async (j) => { reportResults.push(j.data.id); return "done"; });
+    const emailWorker = new Worker(emailQueue, async (j) => {
+      emailResults.push(j.data.to);
+      return "sent";
+    });
+    const reportWorker = new Worker(reportQueue, async (j) => {
+      reportResults.push(j.data.id);
+      return "done";
+    });
 
     emailWorker.start();
     reportWorker.start();
 
-    const e1 = await emailQueue.add("send",  { to: "alice@example.com" });
-    const e2 = await emailQueue.add("send",  { to: "bob@example.com"   });
+    const e1 = await emailQueue.add("send", { to: "alice@example.com" });
+    const e2 = await emailQueue.add("send", { to: "bob@example.com" });
     const r1 = await reportQueue.add("build", { id: 99 });
 
     await waitFor(async () => {
       return (
-        (await emailQueue.get(e1.id))?.status  === "completed" &&
-        (await emailQueue.get(e2.id))?.status  === "completed" &&
+        (await emailQueue.get(e1.id))?.status === "completed" &&
+        (await emailQueue.get(e2.id))?.status === "completed" &&
         (await reportQueue.get(r1.id))?.status === "completed"
       );
     });
@@ -228,21 +240,21 @@ describe("Integration — multiple queues", () => {
 describe("Integration — event observability", () => {
   it("collects completed and failed events across mixed jobs", async () => {
     const completedIds: string[] = [];
-    const failedIds:    string[] = [];
+    const failedIds: string[] = [];
 
-    const queue  = new Queue<{ fail: boolean }>("observable", client);
+    const queue = new Queue<{ fail: boolean }>("observable", client);
     const worker = new Worker(queue, async (job) => {
       if (job.data.fail) throw new Error("intentional");
       return "ok";
     });
 
     worker.on("completed", (job) => completedIds.push(job.id));
-    worker.on("failed",    (job) => failedIds.push(job.id));
+    worker.on("failed", (job) => failedIds.push(job.id));
     worker.start();
 
-    const ok1 = await queue.add("ok-1",  { fail: false });
-    const ok2 = await queue.add("ok-2",  { fail: false });
-    const bad = await queue.add("bad-1", { fail: true  }, { attempts: 1 });
+    const ok1 = await queue.add("ok-1", { fail: false });
+    const ok2 = await queue.add("ok-2", { fail: false });
+    const bad = await queue.add("bad-1", { fail: true }, { attempts: 1 });
 
     await waitFor(async () => {
       return (

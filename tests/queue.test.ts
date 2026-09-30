@@ -51,7 +51,7 @@ describe("Queue — construction", () => {
 
 describe("Queue — add()", () => {
   it("returns a job with a UUID v4 id", async () => {
-    const q   = makeQueue();
+    const q = makeQueue();
     const job = await q.add("greet", { msg: "hello" });
     expect(job.id).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
@@ -59,27 +59,27 @@ describe("Queue — add()", () => {
   });
 
   it("sets name and data", async () => {
-    const q   = makeQueue();
+    const q = makeQueue();
     const job = await q.add("greet", { msg: "hello" });
     expect(job.name).toBe("greet");
     expect(job.data).toEqual({ msg: "hello" });
   });
 
   it("plain job starts as 'waiting'", async () => {
-    const q   = makeQueue();
+    const q = makeQueue();
     const job = await q.add("plain", { msg: "x" });
     expect(job.status).toBe("waiting");
   });
 
   it("delayed job starts as 'waiting' — runAt gates pickup", async () => {
-    const q   = makeQueue();
+    const q = makeQueue();
     const job = await q.add("delayed", { msg: "x" }, { delay: 5000 });
     expect(job.status).toBe("waiting");
     expect(job.runAt).toBeGreaterThan(Date.now());
   });
 
   it("cron job starts as 'delayed'", async () => {
-    const q   = makeQueue();
+    const q = makeQueue();
     const job = await q.add("cron", { msg: "x" }, { cron: "0 * * * *" });
     expect(job.status).toBe("delayed");
     expect(job.cron).toBe("0 * * * *");
@@ -87,33 +87,33 @@ describe("Queue — add()", () => {
   });
 
   it("accepts a custom jobId", async () => {
-    const q   = makeQueue();
+    const q = makeQueue();
     const job = await q.add("custom", { msg: "x" }, { jobId: "my-id" });
     expect(job.id).toBe("my-id");
   });
 
   it("sets priority from opts", async () => {
-    const q   = makeQueue();
+    const q = makeQueue();
     const job = await q.add("prio", { msg: "x" }, { priority: 7 });
     expect(job.priority).toBe(7);
   });
 
   it("inherits attempts from client config", async () => {
-    const q   = makeQueue();
+    const q = makeQueue();
     const job = await q.add("inherit", { msg: "x" });
     expect(job.attempts).toBe(client.getConfig().attempts);
   });
 
   it("per-job attempts override", async () => {
-    const q   = makeQueue();
+    const q = makeQueue();
     const job = await q.add("override", { msg: "x" }, { attempts: 7 });
     expect(job.attempts).toBe(7);
   });
 
   it("sets createdAt / updatedAt close to now", async () => {
     const before = Date.now();
-    const q      = makeQueue();
-    const job    = await q.add("time", { msg: "x" });
+    const q = makeQueue();
+    const job = await q.add("time", { msg: "x" });
     expect(job.createdAt).toBeGreaterThanOrEqual(before);
     expect(job.updatedAt).toBeGreaterThanOrEqual(before);
   });
@@ -123,7 +123,7 @@ describe("Queue — add()", () => {
 
 describe("Queue — get()", () => {
   it("retrieves an existing job", async () => {
-    const q   = makeQueue();
+    const q = makeQueue();
     const job = await q.add("fetch", { msg: "hi" });
     const got = await q.get(job.id);
     expect(got?.id).toBe(job.id);
@@ -140,7 +140,7 @@ describe("Queue — get()", () => {
 
 describe("Queue — remove()", () => {
   it("removes a job so get() returns undefined", async () => {
-    const q   = makeQueue();
+    const q = makeQueue();
     const job = await q.add("rm", { msg: "x" });
     await q.remove(job.id);
     expect(await q.get(job.id)).toBeUndefined();
@@ -164,7 +164,7 @@ describe("Queue — list()", () => {
   });
 
   it("filters by status", async () => {
-    const q    = makeQueue();
+    const q = makeQueue();
     await q.add("w1", { msg: "1" });
     await q.add("w2", { msg: "2" });
     const cron = await q.add("cr", { msg: "3" }, { cron: "0 * * * *" });
@@ -181,9 +181,9 @@ describe("Queue — list()", () => {
 
   it("sorts by priority ASC then createdAt ASC", async () => {
     const q = makeQueue();
-    await q.add("low",  { msg: "l" }, { priority: 10 });
-    await q.add("high", { msg: "h" }, { priority: 1  });
-    await q.add("mid",  { msg: "m" }, { priority: 5  });
+    await q.add("low", { msg: "l" }, { priority: 10 });
+    await q.add("high", { msg: "h" }, { priority: 1 });
+    await q.add("mid", { msg: "m" }, { priority: 5 });
 
     const jobs = await q.list();
     expect(jobs[0]!.name).toBe("high");

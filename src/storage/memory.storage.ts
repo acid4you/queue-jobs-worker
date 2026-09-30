@@ -28,10 +28,7 @@ export class MemoryStorage implements IStorage {
     this.store.clear();
   }
 
-  async saveJob<TData, TResult>(
-    queueName: string,
-    job: Job<TData, TResult>,
-  ): Promise<void> {
+  async saveJob<TData, TResult>(queueName: string, job: Job<TData, TResult>): Promise<void> {
     const queue = this.getOrCreateQueue(queueName);
     queue.set(job.id, job as unknown as Job);
   }
@@ -85,20 +82,15 @@ export class MemoryStorage implements IStorage {
     return this.sortJobs(jobs);
   }
 
-  async getNextJob<TData, TResult>(
-    queueName: string,
-  ): Promise<Job<TData, TResult> | undefined> {
+  async getNextJob<TData, TResult>(queueName: string): Promise<Job<TData, TResult> | undefined> {
     const queue = this.store.get(queueName);
     if (!queue) return undefined;
 
     const now = Date.now();
 
-    const candidates = (Array.from(queue.values()) as Job<TData, TResult>[])
-      .filter(
-        (j) =>
-          (j.status === "waiting" || j.status === "retrying") &&
-          j.runAt <= now,
-      );
+    const candidates = (Array.from(queue.values()) as Job<TData, TResult>[]).filter(
+      (j) => (j.status === "waiting" || j.status === "retrying") && j.runAt <= now,
+    );
 
     if (candidates.length === 0) return undefined;
 
@@ -111,9 +103,9 @@ export class MemoryStorage implements IStorage {
     // to prevent double-claims within a single process.
     const claimed: Job = {
       ...(next as unknown as Job),
-      status:      "active",
+      status: "active",
       processedAt: now,
-      updatedAt:   now,
+      updatedAt: now,
     };
     queue.set(next.id, claimed);
 
@@ -143,9 +135,7 @@ export class MemoryStorage implements IStorage {
    * Sort jobs by priority ascending (lower number = higher priority),
    * then by createdAt ascending (older jobs run first).
    */
-  private sortJobs<TData, TResult>(
-    jobs: Job<TData, TResult>[],
-  ): Job<TData, TResult>[] {
+  private sortJobs<TData, TResult>(jobs: Job<TData, TResult>[]): Job<TData, TResult>[] {
     return jobs.slice().sort((a, b) => {
       if (a.priority !== b.priority) return a.priority - b.priority;
       return a.createdAt - b.createdAt;

@@ -60,14 +60,12 @@ export class RedisStorage implements IStorage {
     } catch {
       throw new Error(
         "[queue-jobs-worker] Redis dialect requires the `redis` package. " +
-        "Run: npm install redis",
+          "Run: npm install redis",
       );
     }
 
     const c = mod.createClient({ url: this.connectionString });
-    c.on("error", (err: unknown) =>
-      console.error("[queue-jobs-worker] Redis error:", err),
-    );
+    c.on("error", (err: unknown) => console.error("[queue-jobs-worker] Redis error:", err));
     await c.connect();
     this.client = c;
 
@@ -87,26 +85,12 @@ export class RedisStorage implements IStorage {
    * Persist a new job.
    * 1 round-trip (save-job.lua: SET + ZADD index + conditional ZADD waiting).
    */
-  async saveJob<TData, TResult>(
-    queueName: string,
-    job: Job<TData, TResult>,
-  ): Promise<void> {
-    const eligible =
-      job.status === "waiting" || job.status === "retrying" ? "1" : "0";
+  async saveJob<TData, TResult>(queueName: string, job: Job<TData, TResult>): Promise<void> {
+    const eligible = job.status === "waiting" || job.status === "retrying" ? "1" : "0";
 
     await this.evalSha("save-job", {
-      keys: [
-        this.hashKey(job.id),
-        this.indexKey(queueName),
-        this.waitingKey(queueName),
-      ],
-      arguments: [
-        JSON.stringify(job),
-        job.id,
-        String(job.priority),
-        String(job.runAt),
-        eligible,
-      ],
+      keys: [this.hashKey(job.id), this.indexKey(queueName), this.waitingKey(queueName)],
+      arguments: [JSON.stringify(job), job.id, String(job.priority), String(job.runAt), eligible],
     });
   }
 
@@ -141,7 +125,7 @@ export class RedisStorage implements IStorage {
     patch: Partial<Job<TData, TResult>>,
   ): Promise<void> {
     const newStatus = (patch.status ?? "") as string;
-    const nowMs     = String(Date.now());
+    const nowMs = String(Date.now());
 
     // BUG FIX: `patch.runAt ?? 0` defaulted to "0" whenever runAt was not in
     // the patch (e.g. a simple status→completed update).  The Lua script then
@@ -154,15 +138,15 @@ export class RedisStorage implements IStorage {
 
     // Only send a real priority when it was explicitly included in the patch.
     // The Lua script skips the ZADD when priority is the sentinel "-1".
-    const priority  = patch.priority !== undefined ? String(patch.priority) : "-1";
+    const priority = patch.priority !== undefined ? String(patch.priority) : "-1";
 
     // RS = ASCII record separator — safe delimiter that cannot appear in
     // job field names or in any value we ever store (error messages, stack
     // traces, cron expressions, UUIDs, etc.).
     const RS = "\x1e";
 
-    const strParts:  string[] = [];
-    const numParts:  string[] = [];
+    const strParts: string[] = [];
+    const numParts: string[] = [];
     const nullParts: string[] = [];
     const boolParts: string[] = [];
 
@@ -188,11 +172,7 @@ export class RedisStorage implements IStorage {
     }
 
     await this.evalSha("update-job", {
-      keys: [
-        this.hashKey(jobId),
-        this.indexKey(queueName),
-        this.waitingKey(queueName),
-      ],
+      keys: [this.hashKey(jobId), this.indexKey(queueName), this.waitingKey(queueName)],
       arguments: [
         newStatus,
         nowMs,
@@ -201,7 +181,7 @@ export class RedisStorage implements IStorage {
         strParts.join(RS),
         numParts.join(RS),
         nullParts.join(RS),
-        boolParts.join(RS),   // ARGV[8] — new in update-job.lua v5
+        boolParts.join(RS), // ARGV[8] — new in update-job.lua v5
       ],
     });
   }
@@ -212,11 +192,7 @@ export class RedisStorage implements IStorage {
    */
   async removeJob(queueName: string, jobId: string): Promise<void> {
     await this.evalSha("remove-job", {
-      keys: [
-        this.hashKey(jobId),
-        this.indexKey(queueName),
-        this.waitingKey(queueName),
-      ],
+      keys: [this.hashKey(jobId), this.indexKey(queueName), this.waitingKey(queueName)],
       arguments: [jobId],
     });
   }
@@ -231,7 +207,7 @@ export class RedisStorage implements IStorage {
     status?: JobStatus,
   ): Promise<Job<TData, TResult>[]> {
     const raw = await this.evalSha("list-jobs", {
-      keys:      [this.indexKey(queueName)],
+      keys: [this.indexKey(queueName)],
       arguments: [status ?? ""],
     });
 
@@ -244,11 +220,9 @@ export class RedisStorage implements IStorage {
    * Atomically claim the next eligible job and mark it active.
    * 1 round-trip (claim-job.lua).
    */
-  async getNextJob<TData, TResult>(
-    queueName: string,
-  ): Promise<Job<TData, TResult> | undefined> {
+  async getNextJob<TData, TResult>(queueName: string): Promise<Job<TData, TResult> | undefined> {
     const raw = await this.evalSha("claim-job", {
-      keys:      [this.indexKey(queueName), this.waitingKey(queueName)],
+      keys: [this.indexKey(queueName), this.waitingKey(queueName)],
       arguments: [String(Date.now())],
     });
 
@@ -262,7 +236,7 @@ export class RedisStorage implements IStorage {
    */
   async clearQueue(queueName: string): Promise<void> {
     await this.evalSha("clear-queue", {
-      keys:      [this.indexKey(queueName), this.waitingKey(queueName)],
+      keys: [this.indexKey(queueName), this.waitingKey(queueName)],
       arguments: [],
     });
   }
@@ -301,9 +275,7 @@ export class RedisStorage implements IStorage {
     );
 
     // Load all scripts into Redis concurrently.
-    const shas = await Promise.all(
-      sources.map((src) => c.scriptLoad(src)),
-    );
+    const shas = await Promise.all(sources.map((src) => c.scriptLoad(src)));
 
     // Store with a safe assignment — no non-null assertion needed.
     for (let i = 0; i < names.length; i++) {
@@ -331,7 +303,7 @@ export class RedisStorage implements IStorage {
     if (!sha) {
       throw new Error(
         `[queue-jobs-worker] Lua script "${name}" has not been loaded. ` +
-        "This is a bug — please open an issue.",
+          "This is a bug — please open an issue.",
       );
     }
 
@@ -352,8 +324,7 @@ export class RedisStorage implements IStorage {
   private assertClient(): RedisClientLike {
     if (!this.client) {
       throw new Error(
-        "[queue-jobs-worker] RedisStorage is not connected. " +
-        "Call client.init() first.",
+        "[queue-jobs-worker] RedisStorage is not connected. " + "Call client.init() first.",
       );
     }
     return this.client;
@@ -388,8 +359,5 @@ interface RedisClientLike {
   get(key: string): Promise<string | null>;
   zCard(key: string): Promise<number>;
   scriptLoad(script: string): Promise<string>;
-  evalSha(
-    sha: string,
-    opts: { keys: string[]; arguments: string[] },
-  ): Promise<unknown>;
+  evalSha(sha: string, opts: { keys: string[]; arguments: string[] }): Promise<unknown>;
 }

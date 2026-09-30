@@ -5,18 +5,18 @@ import type { Job } from "../src/types/job.types.js";
 function makeJob(overrides: Partial<Job> = {}): Job {
   const now = Date.now();
   return {
-    id:           "job-1",
-    name:         "test",
-    data:         { x: 1 },
-    status:       "waiting",
-    opts:         {},
-    attempts:     3,
+    id: "job-1",
+    name: "test",
+    data: { x: 1 },
+    status: "waiting",
+    opts: {},
+    attempts: 3,
     attemptsMade: 0,
-    delay:        0,
-    runAt:        now,
-    priority:     0,
-    createdAt:    now,
-    updatedAt:    now,
+    delay: 0,
+    runAt: now,
+    priority: 0,
+    createdAt: now,
+    updatedAt: now,
     ...overrides,
   };
 }
@@ -62,9 +62,7 @@ describe("MemoryStorage — updateJob", () => {
   });
 
   it("is a no-op for an unknown jobId", async () => {
-    await expect(
-      storage.updateJob("q", "ghost", { status: "active" }),
-    ).resolves.toBeUndefined();
+    await expect(storage.updateJob("q", "ghost", { status: "active" })).resolves.toBeUndefined();
   });
 });
 
@@ -99,8 +97,8 @@ describe("MemoryStorage — listJobs", () => {
   it("sorts by priority then createdAt (asc)", async () => {
     const t = Date.now();
     await storage.saveJob("q", makeJob({ id: "p3", priority: 10, createdAt: t }));
-    await storage.saveJob("q", makeJob({ id: "p1", priority: 1,  createdAt: t }));
-    await storage.saveJob("q", makeJob({ id: "p2", priority: 5,  createdAt: t }));
+    await storage.saveJob("q", makeJob({ id: "p1", priority: 1, createdAt: t }));
+    await storage.saveJob("q", makeJob({ id: "p2", priority: 5, createdAt: t }));
 
     const jobs = await storage.listJobs("q");
     expect(jobs.map((j) => j.id)).toEqual(["p1", "p2", "p3"]);
@@ -114,8 +112,8 @@ describe("MemoryStorage — listJobs", () => {
 describe("MemoryStorage — getNextJob", () => {
   it("returns the first waiting job whose runAt <= now", async () => {
     const now = Date.now();
-    await storage.saveJob("q", makeJob({ id: "ready",  status: "waiting",  runAt: now - 100 }));
-    await storage.saveJob("q", makeJob({ id: "future", status: "waiting",  runAt: now + 60_000 }));
+    await storage.saveJob("q", makeJob({ id: "ready", status: "waiting", runAt: now - 100 }));
+    await storage.saveJob("q", makeJob({ id: "future", status: "waiting", runAt: now + 60_000 }));
     const next = await storage.getNextJob("q");
     expect(next?.id).toBe("ready");
   });
@@ -129,9 +127,9 @@ describe("MemoryStorage — getNextJob", () => {
 
   it("does not return active, completed, or failed jobs", async () => {
     const now = Date.now();
-    await storage.saveJob("q", makeJob({ id: "a",  status: "active",    runAt: now }));
-    await storage.saveJob("q", makeJob({ id: "c",  status: "completed", runAt: now }));
-    await storage.saveJob("q", makeJob({ id: "f",  status: "failed",    runAt: now }));
+    await storage.saveJob("q", makeJob({ id: "a", status: "active", runAt: now }));
+    await storage.saveJob("q", makeJob({ id: "c", status: "completed", runAt: now }));
+    await storage.saveJob("q", makeJob({ id: "f", status: "failed", runAt: now }));
     expect(await storage.getNextJob("q")).toBeUndefined();
   });
 
@@ -141,8 +139,14 @@ describe("MemoryStorage — getNextJob", () => {
 
   it("returns the highest-priority eligible job", async () => {
     const now = Date.now();
-    await storage.saveJob("q", makeJob({ id: "low",  priority: 10, runAt: now - 1, status: "waiting" }));
-    await storage.saveJob("q", makeJob({ id: "high", priority: 1,  runAt: now - 1, status: "waiting" }));
+    await storage.saveJob(
+      "q",
+      makeJob({ id: "low", priority: 10, runAt: now - 1, status: "waiting" }),
+    );
+    await storage.saveJob(
+      "q",
+      makeJob({ id: "high", priority: 1, runAt: now - 1, status: "waiting" }),
+    );
     const next = await storage.getNextJob("q");
     expect(next?.id).toBe("high");
   });

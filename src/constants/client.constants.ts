@@ -6,7 +6,7 @@ import type { QueueClientConfigOptions } from "../types/client.types.js";
  */
 export const DEFAULT_QUEUE_CONFIG: Required<QueueClientConfigOptions> = {
   attempts: 3,
-  retryDelay: 1000,   // 1 second base delay
+  retryDelay: 1000, // 1 second base delay
   backoff: "exponential",
-  timeout: 30_000,    // 30 seconds
+  timeout: 30_000, // 30 seconds
 };

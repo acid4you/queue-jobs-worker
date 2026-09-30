@@ -12,24 +12,24 @@ We encourage contributors to focus on building and improving the product, sharin
 
 Project participants are expected to:
 
-* Be respectful and professional.
-* Communicate constructively and in good faith.
-* Focus on technical issues rather than individuals.
-* Accept constructive feedback.
-* Respect different opinions, experiences, and approaches.
-* Provide clear and relevant information when reporting issues or submitting contributions.
-* Follow the project's contribution guidelines and community standards.
+- Be respectful and professional.
+- Communicate constructively and in good faith.
+- Focus on technical issues rather than individuals.
+- Accept constructive feedback.
+- Respect different opinions, experiences, and approaches.
+- Provide clear and relevant information when reporting issues or submitting contributions.
+- Follow the project's contribution guidelines and community standards.
 
 ## Unacceptable Behavior
 
 The following behavior is not acceptable:
 
-* Harassment, discrimination, or personal attacks.
-* Trolling, insulting, or deliberately disruptive behavior.
-* Publishing or sharing someone's private information without permission.
-* Threats, intimidation, or abusive language.
-* Spam or intentionally misleading contributions.
-* Any other conduct that would reasonably be considered inappropriate in a professional open-source community.
+- Harassment, discrimination, or personal attacks.
+- Trolling, insulting, or deliberately disruptive behavior.
+- Publishing or sharing someone's private information without permission.
+- Threats, intimidation, or abusive language.
+- Spam or intentionally misleading contributions.
+- Any other conduct that would reasonably be considered inappropriate in a professional open-source community.
 
 ## Reporting Issues
 
@@ -43,10 +43,10 @@ Project maintainers are responsible for clarifying and enforcing this Code of Co
 
 Maintainers may take appropriate action in response to unacceptable behavior, including:
 
-* Removing inappropriate comments or contributions.
-* Closing issues, discussions, or pull requests.
-* Temporarily restricting participation.
-* Permanently restricting participation when necessary.
+- Removing inappropriate comments or contributions.
+- Closing issues, discussions, or pull requests.
+- Temporarily restricting participation.
+- Permanently restricting participation when necessary.
 
 Maintainers will make a reasonable effort to handle reports fairly and respectfully.
 
