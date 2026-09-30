@@ -56,6 +56,10 @@ export class Queue<TData = unknown, TResult = unknown> {
   /** Active croner handles keyed by jobId — used to cancel scheduled jobs. */
   private readonly _cronHandles = new Map<string, Cron>();
 
+  /** Workers attached to this queue — auto-closed when queue.close() is called. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private readonly _workers = new Set<{ close(): Promise<void> }>();
+
   constructor(
     name: string,
     client?: QueueClient,
@@ -189,7 +193,46 @@ export class Queue<TData = unknown, TResult = unknown> {
     return this.storage.countJobs(this.name);
   }
 
+  /**
+   * Gracefully shut down everything tied to this queue.
+   *
+   * In order:
+   * 1. Stop all Workers that were created from this queue (waits for
+   *    in-flight jobs to finish before each worker resolves).
+   * 2. Cancel all active cron schedules.
+   *
+   * You do NOT need to call worker.close() separately — this handles it.
+   */
+  public async close(): Promise<void> {
+    // Close all attached workers concurrently.
+    await Promise.all([...this._workers].map((w) => w.close()));
+    this._workers.clear();
+
+    // Stop all cron handles.
+    for (const [id] of this._cronHandles) {
+      this._cancelCron(id);
+    }
+
+    this.client._log(`Queue[${this.name}] closed.`);
+  }
+
   // ── Internal — used by Worker only ───────────────────────────────────────
+
+  /**
+   * Register a Worker so it is auto-closed when queue.close() is called.
+   * @internal
+   */
+  public _registerWorker(worker: { close(): Promise<void> }): void {
+    this._workers.add(worker);
+  }
+
+  /**
+   * Remove a Worker from the auto-close registry (called by worker.close()).
+   * @internal
+   */
+  public _unregisterWorker(worker: { close(): Promise<void> }): void {
+    this._workers.delete(worker);
+  }
 
   /**
    * Atomically claim the next eligible job.

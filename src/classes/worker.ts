@@ -96,6 +96,9 @@ export class Worker<
     this.concurrency  = Math.max(1, options.concurrency  ?? 1);
     this.pollInterval = Math.max(0, options.pollInterval ?? 500);
 
+    // Register with the queue so queue.close() can auto-close this worker.
+    this.queue._registerWorker(this);
+
     // FIX: Do NOT attach a blank "error" listener here — that silently swallows
     // errors even when the caller attaches their own listener later, because
     // EventEmitter walks ALL listeners including the blank no-op.
@@ -136,6 +139,10 @@ export class Worker<
     }
 
     await this.drainActive();
+
+    // Deregister from the queue — prevents a double-close if queue.close()
+    // is called after this worker was already closed manually.
+    this.queue._unregisterWorker(this);
 
     this.emit("stopped");
     this._log(`Worker[${this.queue.name}] stopped.`);
