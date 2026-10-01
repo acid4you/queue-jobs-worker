@@ -1,71 +1,33 @@
-/**
- * queue-jobs-worker
- *
- * Reliable job queue and background worker system for Node.js.
- *
- * Quick start:
- *
- *   import { QueueClient } from "queue-jobs-worker";
- *
- *   // In-memory (dev / tests)
- *   const client = new QueueClient();
- *
- *   // Redis
- *   const client = new QueueClient({ dialect: "redis", connectionString: "redis://localhost:6379" });
- *   await client.init();
- *
- *   // PostgreSQL
- *   const client = new QueueClient({ dialect: "postgres", connectionString: "postgresql://..." });
- *   await client.init();
- *
- *   // MySQL
- *   const client = new QueueClient({ dialect: "mysql", connectionString: "mysql://..." });
- *   await client.init();
- *
- * @module queue-jobs-worker
- */
+// ── Core classes ──────────────────────────────────────────────────────────────
+export { QueueClient } from "./classes/client.js";
+export { Queue } from "./classes/queue.js";
+export { Worker } from "./classes/worker.js";
 
-// Core
-export { QueueClient } from "./core/client.js";
-export { Queue } from "./core/queue.js";
-export { Job } from "./core/job.js";
-export { Worker } from "./core/worker.js";
+// ── Worker types ──────────────────────────────────────────────────────────────
+export type { WorkerHandler, WorkerEvents } from "./classes/worker.js";
 
-// Storage adapters
-export { InMemoryStorageAdapter } from "./storage/in-memory.adapter.js";
-export { RedisStorageAdapter } from "./storage/redis.adapter.js";
-export { PostgreSQLStorageAdapter } from "./storage/postgres.adapter.js";
-export { MySQLStorageAdapter } from "./storage/mysql.adapter.js";
-
-// Event emitter
-export { QueueEventEmitter } from "./events/emitter.js";
-
-// Utilities
-export { calculateBackoff, nextRunAt } from "./core/backoff.js";
-export { generateJobId } from "./core/id.js";
-
-// All public types
+// ── All public types ──────────────────────────────────────────────────────────
 export type {
-  JobStatus,
-  JobAttempt,
-  JobSchedule,
-  JobOptions,
-  BackoffStrategy,
-  JobData,
-  RateLimitOptions,
-  QueueOptions,
-  Processor,
-  WorkerOptions,
-  WorkerStatus,
-  StorageAdapter,
-  EnqueueInput,
-  ClaimInput,
-  ClaimResult,
-  RequeueInput,
-  MoveToDlqInput,
-  GetJobsFilter,
+  // Client
   StorageDialect,
-  ClientDefaults,
+  BackoffStrategy,
+  RateLimitOptions,
+  QueueClientConfigOptions,
   QueueClientOptions,
-  QueueEvents,
+  // Legacy lowercase aliases (backward compat)
+  storageDialect,
+  rateLimitOptions,
+  // Queue / Worker
+  QueueOptions,
+  WorkerOptions,
+  // Job
+  Job,
+  JobOptions,
+  JobStatus,
 } from "./types/index.js";
+
+// ── Storage interface (for custom backend authors) ────────────────────────────
+export type { IStorage } from "./storage/storage.interface.js";
+
+// ── Package version ───────────────────────────────────────────────────────────
+export { VERSION } from "./version.js";

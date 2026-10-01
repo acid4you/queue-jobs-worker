@@ -10,13 +10,13 @@ Instead I recommend you report them privately to the project maintainer.
 
 Please include:
 
-* version
+- version
 
-* Short description
+- Short description
 
-* Reproduction steps
+- Reproduction steps
 
-* Potential impact
+- Potential impact
 
 ## Public Security Issues
 
@@ -26,10 +26,10 @@ When reporting publicly avoid including credentials, private data exploit detail
 
 ## Security Considerations
 
-* Keep database and Redis credentials outside source code.
+- Keep database and Redis credentials outside source code.
 
-* Avoid storing secrets in job payloads.
+- Avoid storing secrets in job payloads.
 
-* Workers execute user-defined JavaScript. Do not sandbox untrusted code.
+- Workers execute user-defined JavaScript. Do not sandbox untrusted code.
 
-* Use connections and authentication, for production storage backends.
+- Use connections and authentication, for production storage backends.

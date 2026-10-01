@@ -1,157 +1,76 @@
 /**
- * All types related to Job identity, state, configuration, and lifecycle.
+ * All possible lifecycle states a job can be in.
+ *
+ * waiting   — Job has been added to the queue and is waiting to be picked up.
+ * delayed   — Job is scheduled to run in the future (delay or cron).
+ * active    — Job is currently being processed by a worker.
+ * completed — Job finished successfully.
+ * failed    — Job exhausted all retry attempts and is permanently failed.
+ * retrying  — Job failed once but still has remaining attempts; waiting for next retry.
  */
+export type JobStatus = "waiting" | "delayed" | "active" | "completed" | "failed" | "retrying";
 
-// ---------------------------------------------------------------------------
-// Job status
-// ---------------------------------------------------------------------------
-
-export type JobStatus =
-  | "waiting" // Persisted, waiting to be claimed
-  | "active" // Claimed by a worker, currently being processed
-  | "completed" // Successfully processed
-  | "delayed" // Scheduled for future execution
-  | "dead"; // All attempts exhausted — in the Dead Letter Queue
-
-// ---------------------------------------------------------------------------
-// Attempt history
-// ---------------------------------------------------------------------------
-
-export interface JobAttempt {
-  /** 1-based attempt number. */
-  readonly attempt: number;
-  /** ISO timestamp when this attempt started. */
-  readonly startedAt: string;
-  /** ISO timestamp when this attempt finished (success or failure). */
-  readonly finishedAt: string;
-  /** Error message if the attempt failed. */
-  readonly error?: string;
-  /** Error stack trace if the attempt failed (never logged by default). */
-  readonly stack?: string | undefined;
-}
-
-// ---------------------------------------------------------------------------
-// Scheduling
-// ---------------------------------------------------------------------------
-
-export interface JobSchedule {
-  /**
-   * Delay in milliseconds before the job becomes eligible.
-   * Mutually exclusive with `runAt`.
-   */
-  delay?: number;
-
-  /**
-   * Absolute timestamp (ISO string or epoch ms) when the job becomes eligible.
-   * Mutually exclusive with `delay`.
-   */
-  runAt?: string | number;
-
-  /**
-   * Cron expression for recurring jobs.
-   * When set the job re-enqueues itself after each successful execution.
-   */
-  cron?: string;
-}
-
-// ---------------------------------------------------------------------------
-// Job configuration (per-job overrides)
-// ---------------------------------------------------------------------------
-
+/**
+ * Options you can pass when adding a job to the queue.
+ *
+ * @property attempts   - Max retry attempts for this specific job (overrides queue default).
+ * @property delay      - Milliseconds to wait before the job becomes eligible to run.
+ * @property priority   - Lower number = higher priority (default: 0).
+ * @property jobId      - Custom job ID. Auto-generated (crypto UUID) if not provided.
+ * @property cron       - A cron expression to schedule the job on a recurring schedule.
+ *                        Uses the `croner` library syntax, e.g. "0 * * * *" (every hour).
+ * @property removeOnComplete - Auto-remove the job from storage after it completes.
+ * @property removeOnFail     - Auto-remove the job from storage after it permanently fails.
+ */
 export interface JobOptions {
-  /** Maximum number of processing attempts (default: inherited from queue/client). */
   attempts?: number;
-
-  /**
-   * Base delay in milliseconds between retry attempts.
-   * Used by the backoff strategy.
-   */
-  retryDelay?: number;
-
-  /** Backoff strategy applied on retry. */
-  backoff?: BackoffStrategy;
-
-  /** Maximum execution time in milliseconds for a single attempt. */
-  timeout?: number;
-
-  /**
-   * Priority value — higher numbers are processed first.
-   * Default: 0.
-   */
+  delay?: number;
   priority?: number;
-
-  /** Scheduling options (delay / runAt / cron). */
-  schedule?: JobSchedule;
+  jobId?: string;
+  cron?: string;
+  removeOnComplete?: boolean;
+  removeOnFail?: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// Backoff strategies
-// ---------------------------------------------------------------------------
-
-export type BackoffStrategy = "fixed" | "exponential" | "linear";
-
-// ---------------------------------------------------------------------------
-// Core Job data structure
-// ---------------------------------------------------------------------------
-
-export interface JobData<TPayload = unknown> {
-  /** Unique, stable job identifier. */
-  readonly id: string;
-
-  /** Name of the queue this job belongs to. */
-  readonly queue: string;
-
-  /** Application-defined job type (matches processor registration). */
-  readonly type: string;
-
-  /** User-supplied job payload. Never logged by default. */
-  readonly payload: TPayload;
-
-  /** Current lifecycle status. */
+/**
+ * The full job record stored in the queue.
+ *
+ * @property id          - Unique identifier (UUID v4 via node:crypto).
+ * @property name        - Logical job name, e.g. "send-welcome-email".
+ * @property data        - Arbitrary payload passed to the worker handler.
+ * @property status      - Current lifecycle state.
+ * @property opts        - Original options this job was created with.
+ * @property attempts    - Max number of attempts allowed.
+ * @property attemptsMade - Number of attempts that have been made so far.
+ * @property delay       - Milliseconds to wait before first run.
+ * @property runAt       - Absolute timestamp (ms) when the job becomes eligible.
+ * @property priority    - Scheduling priority; lower = runs first.
+ * @property cron        - Cron expression for recurring jobs.
+ * @property result      - Return value from the handler on success.
+ * @property error       - Error message from the last failed attempt.
+ * @property stacktrace  - Error stack trace from the last failed attempt.
+ * @property createdAt   - Unix timestamp (ms) when the job was created.
+ * @property updatedAt   - Unix timestamp (ms) of the last status change.
+ * @property processedAt - Unix timestamp (ms) when processing started.
+ * @property finishedAt  - Unix timestamp (ms) when the job completed or permanently failed.
+ */
+export interface Job<TData = unknown, TResult = unknown> {
+  id: string;
+  name: string;
+  data: TData;
   status: JobStatus;
-
-  /** Number of attempts already executed (0 = not yet started). */
+  opts: JobOptions;
+  attempts: number;
   attemptsMade: number;
-
-  /** Maximum allowed attempts. */
-  maxAttempts: number;
-
-  /** Base delay in ms between retries. */
-  retryDelay: number;
-
-  /** Backoff strategy. */
-  backoff: BackoffStrategy;
-
-  /** Per-attempt timeout in ms. */
-  timeout: number;
-
-  /** Processing priority — higher = sooner. */
+  delay: number;
+  runAt: number;
   priority: number;
-
-  /** ISO timestamp when the job is eligible to run (for delayed/scheduled jobs). */
-  runAt: string;
-
-  /** Cron expression (recurring jobs only). */
-  cron?: string | undefined;
-
-  /** Ordered list of past attempt records. */
-  attempts: JobAttempt[];
-
-  /** ID of the worker lock currently owning this job (null when not active). */
-  lockId: string | null;
-
-  /** ISO timestamp when the current lock expires. */
-  lockExpiresAt: string | null;
-
-  /** ISO timestamp when the job was enqueued. */
-  readonly createdAt: string;
-
-  /** ISO timestamp of the last status change. */
-  updatedAt: string;
-
-  /** ISO timestamp when processing completed successfully. */
-  completedAt: string | null;
-
-  /** ISO timestamp when the job was moved to the DLQ. */
-  failedAt: string | null;
+  cron?: string;
+  result?: TResult;
+  error?: string;
+  stacktrace?: string;
+  createdAt: number;
+  updatedAt: number;
+  processedAt?: number;
+  finishedAt?: number;
 }

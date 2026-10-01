@@ -1,28 +1,16 @@
-import { defineConfig, type Plugin } from "vitest/config";
-
-/** Load *.lua files as plain text strings (mirroring tsup's `loader: { ".lua": "text" }`). */
-function rawLuaPlugin(): Plugin {
-  return {
-    name: "raw-lua",
-    transform(code, id) {
-      if (!id.endsWith(".lua")) return null;
-      const json = JSON.stringify(code);
-      return { code: `export default ${json};`, map: null };
-    },
-  };
-}
+import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  plugins: [rawLuaPlugin()],
   test: {
-    globals: true,
+    globals: false,
     environment: "node",
     include: ["tests/**/*.test.ts"],
-    coverage: {
-      provider: "v8",
-      reporter: ["text", "json", "html"],
-      exclude: ["node_modules", "dist", "tests"],
-    },
+    // Each test file runs in its own worker so global state (default client)
+    // never bleeds between files.
+    pool: "forks",
+    reporters: ["verbose"],
+    // Retry/backoff/delay tests need more time than the default 5 s.
+    testTimeout: 30_000,
+    hookTimeout: 15_000,
   },
 });
-

@@ -1,30 +1,17 @@
-/**
- * Public type re-exports.
- */
-
+// ── Client types ──────────────────────────────────────────────────────────────
 export type {
-  JobStatus,
-  JobAttempt,
-  JobSchedule,
-  JobOptions,
+  StorageDialect,
   BackoffStrategy,
-  JobData,
-} from "./job.types.js";
+  RateLimitOptions,
+  QueueClientConfigOptions,
+  QueueClientOptions,
+  // Legacy lowercase aliases
+  storageDialect,
+  rateLimitOptions,
+} from "./client.types.js";
 
-export type { RateLimitOptions, QueueOptions } from "./queue.types.js";
+// ── Queue / Worker types ──────────────────────────────────────────────────────
+export type { QueueOptions, WorkerOptions } from "./queue.types.js";
 
-export type { Processor, WorkerOptions, WorkerStatus } from "./worker.types.js";
-
-export type {
-  StorageAdapter,
-  EnqueueInput,
-  ClaimInput,
-  ClaimResult,
-  RequeueInput,
-  MoveToDlqInput,
-  GetJobsFilter,
-} from "./storage.types.js";
-
-export type { StorageDialect, ClientDefaults, QueueClientOptions } from "./client.types.js";
-
-export type { QueueEvents } from "./events.types.js";
+// ── Job types ─────────────────────────────────────────────────────────────────
+export type { Job, JobOptions, JobStatus } from "./job.types.js";

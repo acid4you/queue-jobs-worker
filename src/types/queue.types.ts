@@ -1,61 +1,37 @@
+import type { RateLimitOptions } from "./client.types.js";
+
 /**
- * Types for Queue configuration and queue-level options.
+ * Options for `new Queue(name, client, options)`.
+ *
+ * Queue is a pure producer — it only manages job storage.
+ * Concurrency, polling, and execution belong to the Worker.
+ *
+ * @property rateLimit      - Optional rate-limit config (max jobs per duration).
+ * @property defaultJobOpts - Per-queue job defaults (override client-level defaults).
  */
-
-import type { BackoffStrategy } from "./job.types.js";
-
-// ---------------------------------------------------------------------------
-// Rate limit configuration
-// ---------------------------------------------------------------------------
-
-export interface RateLimitOptions {
-  /** Maximum number of jobs to process within `duration`. */
-  max: number;
-  /** Time window in milliseconds. */
-  duration: number;
-}
-
-// ---------------------------------------------------------------------------
-// Queue configuration
-// ---------------------------------------------------------------------------
-
 export interface QueueOptions {
-  /**
-   * Maximum concurrent jobs processed across all workers of this queue.
-   * Default: 10.
-   */
-  concurrency?: number;
-
-  /** Default max attempts for jobs in this queue. */
-  attempts?: number;
-
-  /** Default base retry delay in ms for jobs in this queue. */
-  retryDelay?: number;
-
-  /** Default backoff strategy. */
-  backoff?: BackoffStrategy;
-
-  /** Default per-attempt timeout in ms. */
-  timeout?: number;
-
-  /** Queue-level rate limiting. */
   rateLimit?: RateLimitOptions;
-
-  /**
-   * Interval in ms between each poll cycle (how often the worker checks for
-   * new jobs). Default: 1 000 ms.
-   */
-  pollInterval?: number;
-
-  /**
-   * Interval in ms between stalled-job recovery checks.
-   * Default: 30 000 ms.
-   */
-  stalledInterval?: number;
-
-  /**
-   * How long a lock is valid before it is considered expired.
-   * Default: 60 000 ms.
-   */
-  lockDuration?: number;
+  defaultJobOpts?: {
+    attempts?: number;
+    delay?: number;
+    priority?: number;
+    removeOnComplete?: boolean;
+    removeOnFail?: boolean;
+  };
 }
+
+/**
+ * Options for `new Worker(queue, handler, options)`.
+ *
+ * Worker is a pure consumer — it only processes jobs from a Queue.
+ *
+ * @property concurrency  - Max parallel jobs. Default: 1.
+ * @property pollInterval - Ms between queue polls when idle. Default: 500.
+ */
+export interface WorkerOptions {
+  concurrency?: number;
+  pollInterval?: number;
+}
+
+// Re-export for convenience.
+export type { RateLimitOptions };

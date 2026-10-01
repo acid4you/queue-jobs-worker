@@ -1,25 +1,7 @@
 {
   "name": "queue-jobs-worker",
-  "version": "1.0.5",
-  "description": "Reliable job queue and background worker system for Node.js with retries, concurrency, scheduling, and failure recovery.",
-  "keywords": [
-    "queue-jobs-worker",
-    "queue",
-    "job-queue",
-    "background-jobs",
-    "background-processing",
-    "worker",
-    "nodejs",
-    "retry-jobs",
-    "concurrency",
-    "scheduling",
-    "dlq",
-    "dead-letter-queue",
-    "redis",
-    "postgres",
-    "mysql",
-    "typescript"
-  ],
+  "version": "2.0.0",
+  "description": "Reliable background job queue and worker system for Node.js — supports in-memory, Redis, PostgreSQL, and MySQL with retries, concurrency, scheduling, and failure recovery.",
   "homepage": "https://github.com/rafidahmed870/queue-jobs-worker#readme",
   "bugs": {
     "url": "https://github.com/rafidahmed870/queue-jobs-worker/issues"
@@ -31,45 +13,57 @@
   "license": "MIT",
   "author": "Rafid Ahmed",
   "type": "module",
-  "main": "./dist/index.cjs",
-  "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "import": {
-        "types": "./dist/index.d.ts",
-        "default": "./dist/index.js"
-      },
-      "require": {
-        "types": "./dist/index.d.ts",
-        "default": "./dist/index.cjs"
-      }
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
     }
   },
-  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "files": [
-    "dist",
-    "assets",
-    "README.md",
-    "CHANGELOG.md",
-    "LICENSE"
+    "dist"
   ],
+  "packageManager": "pnpm@11.22.0",
   "scripts": {
-    "build": "tsup && tsc -p tsconfig.dts.json",
-    "dev": "tsup --watch",
-    "typecheck": "tsc --noEmit",
-    "lint": "eslint .",
-    "lint:fix": "eslint . --fix",
-    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
-    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "build": "tsup",
+    "build:tsc": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
-    "prepublishOnly": "npm run typecheck && npm run build",
-    "prepare": "husky"
+    "format": "prettier --write .",
+    "prepare": "husky",
+    "prepublishOnly": "pnpm build"
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "keywords": [
+    "queue",
+    "worker",
+    "job",
+    "background",
+    "task",
+    "scheduler",
+    "cron",
+    "redis",
+    "postgres",
+    "mysql",
+    "retry",
+    "concurrency"
+  ],
+  "devDependencies": {
+    "@types/node": "^26.6.1",
+    "@types/pg": "^8.23.1",
+    "@typescript-eslint/eslint-plugin": "^8.70.0",
+    "@typescript-eslint/parser": "^8.70.0",
+    "eslint": "^10.10.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.6",
+    "husky": "^9.1.7",
+    "prettier": "^3.9.8",
+    "tsup": "^8.5.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
   },
   "dependencies": {
     "croner": "^10.0.1"
@@ -89,22 +83,5 @@
     "mysql2": {
       "optional": true
     }
-  },
-  "devDependencies": {
-    "@types/node": "*",
-    "@types/pg": "^8.23.1",
-    "@typescript-eslint/eslint-plugin": "*",
-    "@typescript-eslint/parser": "*",
-    "eslint": "*",
-    "eslint-config-prettier": "*",
-    "eslint-plugin-prettier": "*",
-    "husky": "^9.1.7",
-    "mysql2": "^3.24.2",
-    "pg": "^8.23.0",
-    "prettier": "*",
-    "redis": "^6.2.1",
-    "tsup": "*",
-    "typescript": "*",
-    "vitest": "*"
   }
 }

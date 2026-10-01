@@ -1,572 +1,754 @@
-![queue-jobs-worker](./assets/queue-jobs-worker-github.png)
-
 # queue-jobs-worker
 
-A durable, TypeScript-first job queue for Node.js built for asynchronous work, retries, scheduling, and recovery. It based on multiple storage adapter with postgresql, mysql, redis also in-memory support for dev/testing.
+Reliable background job queue and worker system for Node.js.
 
-<p align="center">
-  <a href="https://www.npmjs.com/package/queue-jobs-worker">
-    <img src="https://img.shields.io/npm/dm/queue-jobs-worker.svg?label=npm%20downloads" alt="npm downloads">
-  </a>&nbsp;
-  <a href="https://www.npmjs.com/package/queue-jobs-worker">
-    <img src="https://img.shields.io/npm/v/queue-jobs-worker.svg?label=npm%20version" alt="npm version">
-  </a>&nbsp;
-  <a href="./LICENSE">
-    <img src="https://img.shields.io/npm/l/queue-jobs-worker.svg" alt="license">
-  </a>&nbsp;
-  <a href="https://nodejs.org">
-    <img src="https://img.shields.io/node/v/queue-jobs-worker.svg" alt="node version">
-  </a>
-</p>
+Supports **in-memory**, **Redis**, **PostgreSQL**, and **MySQL**. Pick the storage that fits your project — the API stays identical regardless of which backend you choose.
 
----
-
-## Overview
-
-`queue-jobs-worker` helps you move background work out of the request lifecycle and into a reliable, persistent queue. Define the processor logic once and let the library handle enqueueing, persistence, retries, schedules, concurrency, rate limiting, and recovery.
-
-It supports all major local and production-friendly backends:
-
-- In-memory queue for development and tests
-- Redis via `node-redis` v4+
-- PostgreSQL via `pg`
-- MySQL via `mysql2`
-
-For a detailed feature breakdown, see [FEATURES.md](./FEATURES.md).
-
-<img src="./assets/queue-jobs-worker-demo.gif" alt="demo" />
-
-## Installation
-
-```bash
+```
 npm install queue-jobs-worker
 ```
 
-Install the driver you plan to use:
+---
 
-```bash
-# Redis
+## Core concept
+
+The library is built around a clean separation of responsibilities:
+
+```
+QueueClient  →  opens and holds the storage connection
+Queue        →  adds, inspects, and removes jobs  (producer)
+Worker       →  picks up and processes jobs        (consumer)
+```
+
+`Queue` and `Worker` are completely independent. Any part of your application can hold a `Queue` reference and add jobs. Only the service that processes jobs needs a `Worker`.
+
+```ts
+import { QueueClient, Queue, Worker } from "queue-jobs-worker";
+
+// 1. Configure storage — once at startup
+const client = new QueueClient({ dialect: "memory" });
+await client.init();
+
+// 2. Producer — add jobs from anywhere
+const queue = new Queue("emails", client);
+await queue.add("welcome", { to: "alice@example.com" });
+
+// 3. Consumer — process jobs in one place
+const worker = new Worker(queue, async (job) => {
+  await sendEmail(job.data.to);
+});
+worker.start();
+
+// 4. Shutdown
+await worker.close();
+await client.close();
+```
+
+---
+
+## Contents
+
+- [Storage backends](#storage-backends)
+- [QueueClient](#queueclient)
+- [Queue](#queue)
+- [Worker](#worker)
+- [Job options](#job-options)
+- [Delayed jobs](#delayed-jobs)
+- [Scheduled (cron) jobs](#scheduled-cron-jobs)
+- [Retries & backoff](#retries--backoff)
+- [Concurrency](#concurrency)
+- [Priority](#priority)
+- [Events](#events)
+- [Express integration](#express-integration)
+- [NestJS integration](#nestjs-integration)
+- [Custom storage backend](#custom-storage-backend)
+- [TypeScript](#typescript)
+- [API reference](#api-reference)
+- [Job lifecycle](#job-lifecycle)
+
+---
+
+## Storage backends
+
+### In-memory (no extra dependencies)
+
+```ts
+const client = new QueueClient({ dialect: "memory" });
+await client.init();
+```
+
+Data lives in the Node.js process. Suitable for local development, testing, and single-process apps.
+
+### Redis
+
+```
 npm install redis
+```
 
-# PostgreSQL
+```ts
+const client = new QueueClient({
+  dialect: "redis",
+  connectionString: "redis://localhost:6379",
+});
+await client.init();
+```
+
+The Redis backend uses Lua scripts loaded on connect (`SCRIPT LOAD` / `EVALSHA`) for atomic job claiming and status updates — no double-pickup under concurrency.
+
+### PostgreSQL
+
+```
 npm install pg
+```
 
-# MySQL
+```ts
+const client = new QueueClient({
+  dialect: "postgres",
+  connectionString: "postgresql://user:pass@localhost:5432/mydb",
+});
+await client.init();
+```
+
+The required table (`qjw_jobs`) is created automatically on the first `init()` call.
+
+### MySQL / MariaDB
+
+```
 npm install mysql2
 ```
 
----
-
-## Quick Start
-
-```js
-const { QueueClient } = require("queue-jobs-worker");
-
-const client = new QueueClient();
-const emails = client.createQueue("emails");
-
-emails.process("send-email", async (job) => {
-  await sendEmail(job.data.to, job.data.subject);
-  // Return to mark the job complete; throw to trigger retry or DLQ handling
-});
-
-emails.createWorker({ concurrency: 5 });
-
-await emails.enqueue("send-email", {
-  to: "user@example.com",
-  subject: "Welcome!",
-});
-
-process.on("SIGTERM", async () => {
-  await client.close();
-  process.exit(0);
-});
-```
-
-If you are using TypeScript, you can optionally make the queue payload type-safe with a generic like `client.createQueue<{ to: string; subject: string }>("emails")`.
-
----
-
-## Supported Backends
-
-Pass `dialect` and `connectionString` to `QueueClient`. Call `await client.init()` to establish database connections and create required schema tables.
-
-```js
-// 1. In-Memory (Default for local development & tests, no persistence)
-const client = new QueueClient({ dialect: "memory" });
-
-// 2. Redis (Supports standard redis://, TLS rediss://, and authentication)
-const client = new QueueClient({
-  dialect: "redis",
-  connectionString: process.env.REDIS_URL || "redis://localhost:6379",
-});
-
-// 3. PostgreSQL (Auto-creates required queue tables on init)
-const client = new QueueClient({
-  dialect: "postgres",
-  connectionString: process.env.POSTGRES_URL || "postgresql://user:password@localhost:5432/mydb",
-});
-
-// 4. MySQL (Auto-creates required queue tables on init)
+```ts
 const client = new QueueClient({
   dialect: "mysql",
-  connectionString: process.env.MYSQL_URL || "mysql://user:password@localhost:3306/mydb",
+  connectionString: "mysql://user:pass@localhost:3306/mydb",
 });
-
-// Initialize backend connection (Required for Redis, PostgreSQL, MySQL)
 await client.init();
 ```
 
-| Dialect    | Connection Format                             | `client.init()` Behavior          |
-| ---------- | --------------------------------------------- | --------------------------------- |
-| `memory`   | N/A                                           | No-op (transient memory store)    |
-| `redis`    | `redis://...`, `rediss://...` (TLS), Auth URL | Connects & verifies with `PING`   |
-| `postgres` | `postgresql://user:pass@host:5432/dbname`     | `SELECT 1` check & creates schema |
-| `mysql`    | `mysql://user:pass@host:3306/dbname`          | Connection check & creates schema |
+The required table (`qjw_jobs`) is created automatically on the first `init()` call.
 
 ---
 
-## Core Concepts
+## QueueClient
 
-| Concept          | Description                                              |
-| ---------------- | -------------------------------------------------------- |
-| `QueueClient`    | Entry point that owns configuration, storage, and queues |
-| `Queue`          | A separate job stream with its own settings              |
-| `Job`            | A unit of work passed to your processor                  |
-| `Worker`         | Claims and executes jobs                                 |
-| `Processor`      | Your async function, e.g. `async (job) => { ... }`       |
-| `StorageAdapter` | A backend abstraction for durable storage                |
-| `DLQ`            | Dead Letter Queue for permanently failed jobs            |
+`QueueClient` holds the storage connection and the global job execution defaults that every `Queue` and `Worker` inherits.
 
----
-
-## Configuration
-
-Settings are layered so more specific config overrides broader defaults:
-
-```
-Client defaults → Queue options → Worker options → Job options
-```
-
-```js
-const { QueueClient } = require("queue-jobs-worker");
-
+```ts
 const client = new QueueClient({
-  dialect: "redis",
-  connectionString: process.env.REDIS_URL,
-
-  defaults: {
-    attempts: 3,
-    retryDelay: 1000,
-    backoff: "exponential",
-    timeout: 30_000,
-    concurrency: 10,
-    pollInterval: 1_000,
-    stalledInterval: 30_000,
-    lockDuration: 60_000,
-    rateLimit: {
-      max: 100,
-      duration: 60_000,
-    },
+  dialect: "memory", // "memory" | "redis" | "postgres" | "mysql"
+  connectionString: "…", // required for redis / postgres / mysql
+  debug: true, // log internal operations to console
+  options: {
+    attempts: 3, // max retry attempts per job (0 = unlimited)
+    retryDelay: 1000, // base delay in ms between retries
+    backoff: "exponential", // "fixed" | "linear" | "exponential"
+    timeout: 30_000, // ms a job may run before it is killed
   },
 });
 
-await client.init();
+await client.init(); // call once at app startup
+await client.close(); // call on shutdown — waits for storage to disconnect
+```
+
+### Default client
+
+The first `init()` call registers this client as the **process-wide default**. Any `Queue` or `Worker` created without an explicit client argument picks it up automatically:
+
+```ts
+await new QueueClient({ dialect: "memory" }).init();
+
+// No client argument needed — uses the default.
+const queue = new Queue("emails");
 ```
 
 ---
 
-## Enqueueing Jobs
+## Queue
 
-```js
-const queue = client.createQueue("notifications");
+`Queue` is the **producer**. It manages a named collection of jobs in storage. It has no polling loop and no execution logic — that is the Worker's job.
 
-await queue.enqueue("send-push", { userId: "u_123" });
-
-await queue.enqueue(
-  "send-push",
-  { userId: "u_123" },
-  {
+```ts
+const queue = new Queue("emails", client, {
+  defaultJobOpts: {
     attempts: 5,
-    retryDelay: 2000,
-    backoff: "linear",
-    timeout: 10_000,
-    priority: 10,
+    removeOnComplete: true,
+  },
+});
+```
+
+### Add a job
+
+```ts
+const job = await queue.add("welcome", { to: "alice@example.com" });
+```
+
+### Get a job by ID
+
+```ts
+const job = await queue.get(jobId); // Job | undefined
+```
+
+### Remove a job
+
+```ts
+await queue.remove(jobId);
+```
+
+### List jobs
+
+```ts
+const all = await queue.list();
+const waiting = await queue.list("waiting");
+const active = await queue.list("active");
+const completed = await queue.list("completed");
+const failed = await queue.list("failed");
+const retrying = await queue.list("retrying");
+```
+
+Results are sorted by priority (ascending) then `createdAt` (ascending).
+
+### Clear all jobs
+
+```ts
+await queue.clear();
+```
+
+### Count jobs
+
+```ts
+const n = await queue.count();
+```
+
+---
+
+## Worker
+
+`Worker` is the **consumer**. It takes a `Queue` and a handler function, polls for eligible jobs, and manages the full job lifecycle.
+
+```ts
+const worker = new Worker(
+  queue, // Queue to consume from
+  async (job) => {
+    // handler — throw to fail, return to complete
+    await processJob(job.data);
+    return "done"; // stored in job.result on success
+  },
+  {
+    concurrency: 3, // max parallel jobs (default: 1)
+    pollInterval: 500, // ms between polls when idle (default: 500)
   },
 );
 ```
 
-If you want TypeScript type safety for `job.data`, pass a generic when creating the queue, such as `client.createQueue<{ userId: string }>("notifications")`.
+### Start and stop
+
+```ts
+worker.start(); // begin polling — non-blocking
+await worker.close(); // graceful shutdown — waits for in-flight jobs
+```
+
+`close()` guarantees that any job currently being processed will finish before the worker stops. Safe to call before `client.close()`.
+
+Calling `start()` after `close()` throws — create a new `Worker` instance instead.
+
+### Shutting down a queue and all its workers at once
+
+`queue.close()` is the recommended shutdown pattern. It automatically stops every `Worker` that was created from this queue, waits for in-flight jobs to drain, then cancels all cron schedules:
+
+```ts
+// Instead of closing each worker individually:
+const queue = new Queue("emails", client);
+const w1 = new Worker(queue, handler, { concurrency: 2 });
+const w2 = new Worker(queue, handler, { concurrency: 2 });
+w1.start();
+w2.start();
+
+// One call closes everything tied to this queue:
+await queue.close();
+await client.close();
+```
+
+`queue.close()` is idempotent — calling it more than once is safe.
+
+### Worker does not manage jobs
+
+All job management methods (`add`, `get`, `remove`, `list`, `count`) live on `Queue`. The Worker's only responsibility is execution.
+
+```ts
+// Add from the queue (producer side)
+const job = await queue.add("task", { payload: "…" });
+
+// Inspect from the queue (anywhere in your app)
+const found = await queue.get(job.id);
+const jobs = await queue.list("completed");
+const n = await queue.count();
+
+// Remove from the queue
+await queue.remove(job.id);
+```
 
 ---
 
-## Processing Jobs
+## Job options
 
-Register a processor before creating or starting a worker. Processors receive the `job` instance as well as an `AbortSignal` for cooperative cancellation when a job attempt times out:
+Pass options as the third argument to `queue.add()`:
 
-```js
-queue.process("send-push", async (job, signal) => {
-  const { userId } = job.data;
-
-  // Pass signal to APIs that support cancellation (e.g. fetch, DB queries):
-  await pushService.send(userId, "You have a new message", { signal });
-
-  // Or check signal.aborted before performing expensive steps:
-  if (signal.aborted) return;
-
-  // Return to mark the job complete.
-  // Throw any error to trigger retry logic or DLQ handling.
+```ts
+await queue.add("task", data, {
+  attempts: 5, // max retry attempts for this job
+  delay: 5_000, // run 5 s from now
+  priority: 1, // lower = runs first (default: 0)
+  jobId: "my-id", // custom ID — auto UUID if omitted
+  cron: "0 9 * * *", // run every day at 09:00 (croner syntax)
+  removeOnComplete: true, // delete from storage after success
+  removeOnFail: true, // delete from storage after permanent failure
 });
 ```
 
-> **Note on Timeout Cancellation**: In Node.js, asynchronous operations cannot be forcibly terminated from the outside. Processors should cooperate with cancellation by checking `signal.aborted` or forwarding `signal` to abortable APIs to ensure timed-out executions do not continue running in the background.
+---
 
-See [FEATURES.md](./FEATURES.md) for the full `job` model and helper methods.
+## Delayed jobs
+
+```ts
+// Run in 30 seconds
+await queue.add("reminder", { userId: 42 }, { delay: 30_000 });
+
+// Run in 1 hour
+await queue.add("follow-up", { orderId: "x" }, { delay: 60 * 60 * 1_000 });
+```
+
+A delayed job has `status: "waiting"` immediately. The Worker checks `runAt <= Date.now()` before picking it up — no separate scheduler required.
 
 ---
 
-## Workers
+## Scheduled (cron) jobs
 
-```js
-const worker = queue.createWorker({
-  concurrency: 10,
-  shutdownTimeout: 30_000,
+Pass any [croner](https://github.com/hexagon/croner)-compatible cron expression:
+
+```ts
+// Every day at 9 AM
+await queue.add("daily-report", {}, { cron: "0 9 * * *" });
+
+// Every hour
+await queue.add("hourly-sync", {}, { cron: "0 * * * *" });
+
+// Every 5 minutes
+await queue.add("health-check", {}, { cron: "*/5 * * * *" });
+```
+
+The job starts as `"delayed"`. After each cron tick it is reset to `"waiting"` and the Worker picks it up like any other job. Remove the job to cancel the schedule:
+
+```ts
+await queue.remove(cronJobId);
+```
+
+---
+
+## Retries & backoff
+
+Configure globally on the client or override per job:
+
+```ts
+// Client-level defaults
+const client = new QueueClient({
+  dialect: "memory",
+  options: {
+    attempts: 5,
+    retryDelay: 1_000,
+    backoff: "exponential",
+  },
 });
 
-console.log(worker.status);
-console.log(worker.id);
-
-await worker.stop();
+// Per-job override
+await queue.add("risky", data, { attempts: 10 });
 ```
 
-Multiple workers can share the same queue and coordinate through the storage layer:
+### Backoff strategies
 
-```js
-const w1 = queue.createWorker({ concurrency: 5 });
-const w2 = queue.createWorker({ concurrency: 5 });
-// total capacity: 10 concurrent jobs
-```
+| Strategy      | Formula                | Example (base = 1 s)  |
+| ------------- | ---------------------- | --------------------- |
+| `fixed`       | `base`                 | 1 s, 1 s, 1 s, …      |
+| `linear`      | `base × attempt`       | 1 s, 2 s, 3 s, …      |
+| `exponential` | `base × 2^(attempt−1)` | 1 s, 2 s, 4 s, 8 s, … |
+
+Exponential strategy is capped at **30 minutes**.
+
+Set `attempts: 0` for unlimited retries.
 
 ---
 
-## Events
+## Concurrency
 
-The client emits lifecycle events that are useful for monitoring and alerting:
+Concurrency is a **Worker** option — not a Queue option. The Queue itself is storage-only.
 
-```js
-client.on("job:completed", (job) => console.log("Done:", job.id));
-client.on("job:failed", (job, err) => console.error("Failed:", job.id, err.message));
-client.on("job:dead", (job, err) => console.error("DLQ:", job.id, err.message));
-client.on("worker:error", (workerId, err) => console.error("Worker error:", err));
-
-client.off("job:completed", myListener);
-client.once("job:dead", (job, err) => alertTeam(job, err));
+```ts
+const worker = new Worker(queue, handler, { concurrency: 5 });
 ```
 
----
+This means you can also scale by running multiple Workers against the same Queue:
 
-## Querying Jobs
-
-```js
-const job = await queue.getJob("job-id-here");
-if (job) {
-  console.log(job.status, job.attemptsMade);
-}
-
-const waiting = await queue.getJobs("waiting", 50, 0);
-const active = await queue.getJobs("active");
-const completed = await queue.getJobs("completed", 100, 0);
-const dead = await queue.getJobs("dead");
-
-const counts = await queue.getJobCounts();
-// {
-//   waiting: 12,
-//   active: 3,
-//   completed: 204,
-//   delayed: 5,
-//   dead: 1
-// }
+```ts
+const w1 = new Worker(queue, handler, { concurrency: 3 });
+const w2 = new Worker(queue, handler, { concurrency: 3 });
+w1.start();
+w2.start();
 ```
 
----
-
-## Retry & Backoff
-
-Retries can be configured at the client, queue, or job level:
-
-```js
-const queue = client.createQueue("tasks", {
-  attempts: 5,
-  retryDelay: 2000,
-  backoff: "exponential",
-});
-
-await queue.enqueue("task", payload, {
-  attempts: 3,
-  retryDelay: 500,
-  backoff: "fixed",
-});
-```
-
-Available strategies are `fixed`, `linear`, and `exponential`. Each failure is tracked in `job.attemptHistory` so you can inspect what happened without losing context.
-
----
-
-## Scheduling
-
-```js
-await queue.enqueue("reminder", payload, { schedule: { delay: 30_000 } });
-await queue.enqueue("report", payload, { schedule: { runAt: "2026-09-01T09:00:00Z" } });
-await queue.enqueue("cleanup", payload, { schedule: { cron: "0 3 * * *" } });
-```
-
-Delayed jobs stay dormant until their scheduled time is reached.
+The Redis backend uses Lua scripts to ensure atomic job claiming — two workers will never pick up the same job.
 
 ---
 
 ## Priority
 
-Jobs with a higher priority value are processed sooner. The default is `0`.
+Lower number = higher priority (default: `0`).
 
-```js
-await queue.enqueue("urgent-task", payload, { priority: 100 });
-await queue.enqueue("normal-task", payload, { priority: 0 });
-await queue.enqueue("low-task", payload, { priority: -10 });
-// order: urgent → normal → low
+```ts
+await queue.add("urgent", data, { priority: 1 });
+await queue.add("normal", data, { priority: 5 });
+await queue.add("bulk", data, { priority: 10 });
 ```
+
+Jobs with equal priority are processed in FIFO order.
 
 ---
 
-## Rate Limiting
+## Events
 
-```js
-const queue = client.createQueue("webhooks", {
-  rateLimit: { max: 50, duration: 60_000 },
+`Worker` extends `EventEmitter` with typed events:
+
+```ts
+worker.on("active", (job) => console.log("processing", job.id));
+worker.on("completed", (job, result) => console.log("done", job.id, result));
+worker.on("error", (job, err) => console.warn("attempt failed", err.message));
+worker.on("failed", (job, err) => console.error("permanent fail", job.id));
+worker.on("started", () => console.log("worker polling"));
+worker.on("stopped", () => console.log("worker stopped"));
+```
+
+| Event       | Arguments     | When                                 |
+| ----------- | ------------- | ------------------------------------ |
+| `active`    | `job`         | Job picked up, processing started    |
+| `completed` | `job, result` | Job finished successfully            |
+| `error`     | `job, error`  | One attempt failed (may still retry) |
+| `failed`    | `job, error`  | All attempts exhausted               |
+| `started`   | —             | `worker.start()` called              |
+| `stopped`   | —             | `worker.close()` resolved            |
+
+---
+
+## Express integration
+
+```ts
+import express from "express";
+import { QueueClient, Queue, Worker } from "queue-jobs-worker";
+
+const app = express();
+
+// ── Startup ───────────────────────────────────────────────────────────────────
+const client = new QueueClient({
+  dialect: "redis",
+  connectionString: process.env.REDIS_URL,
 });
-```
+await client.init();
 
-When a queue reaches its limit, workers pause claiming new jobs until the time window resets. Jobs are not discarded.
+// Producer — anyone can import emailQueue and call add()
+const emailQueue = new Queue<{ to: string; subject: string }>("emails", client);
 
----
+// Consumer — only this module cares about the worker
+const emailWorker = new Worker(
+  emailQueue,
+  async (job) => {
+    await mailer.send(job.data);
+    return "sent";
+  },
+  { concurrency: 5 },
+);
 
-## Dead Letter Queue
+emailWorker.on("failed", (job, err) => {
+  console.error(`Job ${job.id} permanently failed:`, err.message);
+});
+emailWorker.start();
 
-When a job reaches the end of its retry budget, it is moved to the dead-letter queue with status `"dead"`.
-
-```js
-client.on("job:dead", async (job, error) => {
-  await alertOncall({ jobId: job.id, type: job.type, error: error.message });
+// ── Route ─────────────────────────────────────────────────────────────────────
+app.post("/register", async (req, res) => {
+  await emailQueue.add("welcome", { to: req.body.email, subject: "Welcome!" });
+  res.status(202).json({ message: "accepted" });
 });
 
-const deadJobs = await queue.getJobs("dead");
-```
-
-All failure history remains attached to the job record.
-
----
-
-## Graceful Shutdown
-
-Call `client.close()` before your process exits:
-
-```js
+// ── Shutdown ──────────────────────────────────────────────────────────────────
 process.on("SIGTERM", async () => {
-  await client.close();
+  await emailWorker.close(); // drain in-flight jobs
+  await client.close(); // then close storage
   process.exit(0);
 });
 
-process.on("SIGINT", async () => {
-  await client.close();
-  process.exit(0);
-});
+app.listen(3000);
 ```
-
-This stops workers cleanly, releases locks, and allows stalled-job recovery to continue safely after restarts.
 
 ---
 
-## Custom Storage Adapter
+## NestJS integration
 
-You can provide a custom backend by implementing the `StorageAdapter` interface. The same idea applies in JavaScript or TypeScript; the main difference is whether you add explicit interface typing in TypeScript.
+```ts
+// queue.module.ts
+import { Module } from "@nestjs/common";
+import { QueueService } from "./queue.service.js";
 
-```js
-const { QueueClient } = require("queue-jobs-worker");
+@Module({ providers: [QueueService], exports: [QueueService] })
+export class QueueModule {}
 
-class MongoStorageAdapter {
-  async initialize() {
-    /* connect, create indexes */
+// queue.service.ts
+import { Injectable, OnModuleInit, OnModuleDestroy } from "@nestjs/common";
+import { QueueClient, Queue, Worker } from "queue-jobs-worker";
+
+@Injectable()
+export class QueueService implements OnModuleInit, OnModuleDestroy {
+  private client!: QueueClient;
+
+  // Export the Queue so other modules can add jobs without touching the Worker.
+  public emailQueue!: Queue<{ to: string }>;
+  private emailWorker!: Worker<{ to: string }, string>;
+
+  async onModuleInit() {
+    this.client = new QueueClient({
+      dialect: "postgres",
+      connectionString: process.env.DATABASE_URL,
+    });
+    await this.client.init();
+
+    this.emailQueue = new Queue("emails", this.client);
+    this.emailWorker = new Worker(
+      this.emailQueue,
+      async (job) => {
+        await mailer.send(job.data.to);
+        return "sent";
+      },
+      { concurrency: 3 },
+    );
+    this.emailWorker.start();
   }
-  async close() {
-    /* disconnect */
-  }
-  async enqueue(input) {
-    /* ... */
-  }
-  async claim(input) {
-    /* atomic claim */
-  }
-  async complete(jobId) {
-    /* ... */
-  }
-  async requeue(input) {
-    /* ... */
-  }
-  async moveToDlq(input) {
-    /* ... */
-  }
-  async releaseLock(jobId) {
-    /* ... */
-  }
-  async recoverStalledJobs(queue, now) {
-    /* ... */
-  }
-  async getJob(jobId) {
-    /* ... */
-  }
-  async getJobs(filter) {
-    /* ... */
-  }
-  async getJobCounts(queue) {
-    /* ... */
-  }
-  async checkAndIncrementRateLimit(queue, max, windowMs, now) {
-    /* ... */
+
+  async onModuleDestroy() {
+    await this.emailWorker.close();
+    await this.client.close();
   }
 }
 
-const client = QueueClient.withAdapter(new MongoStorageAdapter(), {
-  defaults: { attempts: 5 },
-});
+// users.controller.ts
+@Controller("users")
+export class UsersController {
+  constructor(private readonly queue: QueueService) {}
 
-await client.init();
+  @Post("register")
+  async register(@Body() dto: RegisterDto) {
+    // Only the Queue is needed here — no Worker import required.
+    await this.queue.emailQueue.add("welcome", { to: dto.email });
+    return { message: "accepted" };
+  }
+}
 ```
 
 ---
 
-## API Reference
+## Custom storage backend
 
-### `new QueueClient(options?)`
+Implement `IStorage` to plug in any database or service:
 
-| Option                     | Type                                           | Default         | Description                         |
-| -------------------------- | ---------------------------------------------- | --------------- | ----------------------------------- |
-| `dialect`                  | `"memory" \| "redis" \| "postgres" \| "mysql"` | `"memory"`      | Storage backend                     |
-| `connectionString`         | `string`                                       | —               | Required for Redis/PostgreSQL/MySQL |
-| `defaults.attempts`        | `number`                                       | `3`             | Max retries per job                 |
-| `defaults.retryDelay`      | `number`                                       | `1000`          | Base retry delay in ms              |
-| `defaults.backoff`         | `"fixed" \| "linear" \| "exponential"`         | `"exponential"` | Retry strategy                      |
-| `defaults.timeout`         | `number`                                       | `30000`         | Per-attempt timeout in ms           |
-| `defaults.concurrency`     | `number`                                       | `10`            | Default worker concurrency          |
-| `defaults.pollInterval`    | `number`                                       | `1000`          | Poll interval in ms                 |
-| `defaults.stalledInterval` | `number`                                       | `30000`         | Stalled-job check interval in ms    |
-| `defaults.lockDuration`    | `number`                                       | `60000`         | Lock TTL in ms                      |
-| `defaults.rateLimit`       | `{ max, duration }`                            | —               | Optional rate limiting              |
+```ts
+import type { IStorage, Job, JobStatus } from "queue-jobs-worker";
 
-### `client.init()`
+export class MongoStorage implements IStorage {
+  async connect() {
+    /* open client */
+  }
+  async disconnect() {
+    /* close client */
+  }
 
-Initializes the configured backend. This is required for Redis, PostgreSQL, and MySQL before queue operations. It is safe to call more than once.
+  async saveJob(queueName, job) {
+    /* upsert */
+  }
+  async getJob(queueName, jobId) {
+    /* findOne → Job | undefined */
+  }
+  async updateJob(queueName, jobId, patch) {
+    /* findOneAndUpdate */
+  }
+  async removeJob(queueName, jobId) {
+    /* deleteOne */
+  }
 
-### `client.createQueue<TPayload>(name, options?)`
+  async listJobs(queueName, status?) {
+    /* find, sorted by priority+createdAt */
+  }
+  async getNextJob(queueName) {
+    /* atomic claim: status IN (waiting,retrying) AND runAt <= now */
+  }
 
-Creates and returns a queue. Queue-specific options override client defaults.
+  async clearQueue(queueName) {
+    /* deleteMany */
+  }
+  async countJobs(queueName) {
+    /* countDocuments */
+  }
+}
+```
 
-### `client.getQueue<TPayload>(name)` / `client.requireQueue<TPayload>(name)`
-
-Fetches an existing queue by name. `requireQueue()` throws if none exists.
-
-### `client.on(event, listener)` / `client.once(...)` / `client.off(...)`
-
-Registers and removes event listeners for queue and worker lifecycle events.
-
-### `client.close()`
-
-Stops workers and closes storage connections gracefully.
-
-### `QueueClient.withAdapter(adapter, options?)`
-
-Creates a client using a custom storage backend.
-
-### `queue.enqueue(type, payload, options?)`
-
-| Option           | Type               | Description                           |
-| ---------------- | ------------------ | ------------------------------------- |
-| `attempts`       | `number`           | Maximum attempts for this job         |
-| `retryDelay`     | `number`           | Base retry delay in ms                |
-| `backoff`        | `string`           | Retry backoff strategy                |
-| `timeout`        | `number`           | Per-attempt timeout in ms             |
-| `priority`       | `number`           | Higher values are processed first     |
-| `schedule.delay` | `number`           | Delay before the job becomes eligible |
-| `schedule.runAt` | `string \| number` | Absolute run time                     |
-| `schedule.cron`  | `string`           | Cron expression for recurring jobs    |
-
-### `queue.process(type, processor)`
-
-Registers an async processor for a job type. The processor signature is `async (job, signal) => ...`, where `signal` is an `AbortSignal` aborted when the per-attempt timeout is reached.
-
-### `queue.createWorker(options?)`
-
-| Option            | Type     | Default      | Description                         |
-| ----------------- | -------- | ------------ | ----------------------------------- |
-| `concurrency`     | `number` | queue config | Maximum simultaneous job executions |
-| `shutdownTimeout` | `number` | `30000`      | Graceful shutdown wait time in ms   |
-
-### `queue.getJob(id)` / `queue.getJobs(status?, limit?, offset?)`
-
-### `queue.getJobCounts()`
+The `getNextJob` implementation must be **atomic** in multi-process environments — use a transaction, `findOneAndUpdate`, or a server-side script to prevent two workers claiming the same job.
 
 ---
 
-## Storage Support Matrix
+## TypeScript
 
-| Feature                  | Memory |  Redis  |   PostgreSQL    |      MySQL      |
-| ------------------------ | :----: | :-----: | :-------------: | :-------------: |
-| Persistence              |   —    |    ✓    |        ✓        |        ✓        |
-| Atomic claim             |   ✓    | ✓ (Lua) | ✓ (SKIP LOCKED) | ✓ (SKIP LOCKED) |
-| Priority ordering        |   ✓    |    ✓    |        ✓        |        ✓        |
-| Delayed jobs             |   ✓    |    ✓    |        ✓        |        ✓        |
-| Retry + backoff          |   ✓    |    ✓    |        ✓        |        ✓        |
-| DLQ                      |   ✓    |    ✓    |        ✓        |        ✓        |
-| Stalled recovery         |   ✓    |    ✓    |        ✓        |        ✓        |
-| Rate limiting            |   ✓    |    ✓    |        ✓        |        ✓        |
-| Connection check on init |   —    | ✓ PING  |   ✓ SELECT 1    |   ✓ SELECT 1    |
-| Auto-create schema       |   —    |    —    |        ✓        |        ✓        |
+The library is written in TypeScript and ships full `.d.ts` declarations.
 
----
+Type your job data and result for end-to-end safety:
 
-## Security
+```ts
+interface EmailData {
+  to: string;
+  subject: string;
+  body: string;
+}
+interface EmailResult {
+  messageId: string;
+}
 
-- Job payloads are not logged by default.
-- Error messages do not expose payload data.
-- Connection strings should come from environment variables rather than source code.
-- See [SECURITY.md](./SECURITY.md) for the full policy.
-
-```js
-// Good
-const client = new QueueClient({
-  dialect: "postgres",
-  connectionString: process.env.DATABASE_URL,
+const queue = new Queue<EmailData, EmailResult>("emails", client);
+const worker = new Worker<EmailData, EmailResult>(queue, async (job) => {
+  const id = await mailer.send(job.data); // job.data → EmailData
+  return { messageId: id }; // return type checked as EmailResult
 });
 
-// Bad — never hard-code credentials
-const client = new QueueClient({
-  dialect: "postgres",
-  connectionString: "postgresql://admin:secret@prod-db:5432/app",
+worker.on("completed", (job, result) => {
+  console.log(result.messageId); // result → EmailResult ✓
 });
 ```
 
 ---
 
-## Contributing
+## API reference
 
-Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution guidelines.
+### `QueueClient`
+
+| Method                             | Returns                    | Description                         |
+| ---------------------------------- | -------------------------- | ----------------------------------- |
+| `new QueueClient(opts)`            | —                          | Create a client                     |
+| `init()`                           | `Promise<this>`            | Open storage, register as default   |
+| `close()`                          | `Promise<void>`            | Close storage (idempotent)          |
+| `isInitialized()`                  | `boolean`                  | True between `init()` and `close()` |
+| `isClosed()`                       | `boolean`                  | True after `close()`                |
+| `getConfig()`                      | `QueueClientConfigOptions` | Merged global defaults              |
+| `getDialect()`                     | `StorageDialect`           | Configured dialect                  |
+| `getStorage()`                     | `IStorage`                 | Underlying storage instance         |
+| `QueueClient.getDefaultClient()`   | `QueueClient \| undefined` | Process-wide default                |
+| `QueueClient.setDefaultClient(c)`  | `void`                     | Override the default                |
+| `QueueClient.clearDefaultClient()` | `void`                     | Clear the default                   |
+
+### `Queue`
+
+| Method                            | Returns                     | Description                       |
+| --------------------------------- | --------------------------- | --------------------------------- |
+| `new Queue(name, client?, opts?)` | —                           | Create a queue                    |
+| `add(name, data, opts?)`          | `Promise<Job>`              | Persist a new job                 |
+| `get(jobId)`                      | `Promise<Job \| undefined>` | Fetch a job by ID                 |
+| `remove(jobId)`                   | `Promise<void>`             | Delete a job                      |
+| `list(status?)`                   | `Promise<Job[]>`            | List jobs, optional status filter |
+| `clear()`                         | `Promise<void>`             | Remove all jobs                   |
+| `count()`                         | `Promise<number>`           | Total job count                   |
+| `close()`                         | `Promise<void>`             | Close all workers + cron (idempotent) |
+
+### `Worker`
+
+| Method                              | Returns         | Description                    |
+| ----------------------------------- | --------------- | ------------------------------ |
+| `new Worker(queue, handler, opts?)` | —               | Create a worker                |
+| `start()`                           | `this`          | Start polling                  |
+| `close()`                           | `Promise<void>` | Graceful shutdown              |
+| `isRunning()`                       | `boolean`       | True while polling             |
+| `isClosed()`                        | `boolean`       | True after close()             |
+| `on(event, fn)`                     | `this`          | Subscribe to a lifecycle event |
+
+### `Job`
+
+| Field          | Type        | Description                     |
+| -------------- | ----------- | ------------------------------- |
+| `id`           | `string`    | UUID v4                         |
+| `name`         | `string`    | Job type name                   |
+| `data`         | `TData`     | Payload                         |
+| `status`       | `JobStatus` | Current lifecycle state         |
+| `attempts`     | `number`    | Max attempts allowed            |
+| `attemptsMade` | `number`    | Attempts made so far            |
+| `delay`        | `number`    | Initial delay in ms             |
+| `runAt`        | `number`    | Timestamp when eligible to run  |
+| `priority`     | `number`    | Scheduling priority             |
+| `cron`         | `string?`   | Cron expression                 |
+| `result`       | `TResult?`  | Handler return value on success |
+| `error`        | `string?`   | Last error message              |
+| `stacktrace`   | `string?`   | Last error stack trace          |
+| `createdAt`    | `number`    | Unix ms — created               |
+| `updatedAt`    | `number`    | Unix ms — last status change    |
+| `processedAt`  | `number?`   | Unix ms — processing started    |
+| `finishedAt`   | `number?`   | Unix ms — completed or failed   |
+
+### `JobStatus`
+
+```
+"waiting"   — eligible to be picked up (runAt <= now)
+"delayed"   — cron job waiting for its first tick
+"active"    — currently being processed by a Worker
+"completed" — handler returned successfully
+"failed"    — all attempts exhausted
+"retrying"  — last attempt failed; waiting for retry delay
+```
+
+---
+
+## Job lifecycle
+
+```
+queue.add()
+     │
+     ▼
+ "waiting" ──────────────────────────────────────────────────────────┐
+     │  Worker picks up (runAt <= now)                               │
+     ▼                                                               │
+ "active"                                                            │
+     │                                                               │
+     ├─ handler returns ──► "completed"                              │
+     │                                                               │
+     └─ handler throws                                               │
+           │                                                         │
+           ├─ attempts remaining ──► "retrying" ──(delay)──► ───────┘
+           │
+           └─ no attempts left ──► "failed"
+
+
+queue.add({ cron: "…" })
+     │
+     ▼
+ "delayed"
+     │  croner tick fires
+     ▼
+ "waiting" ──► (same flow above) ──► "completed"
+                                          │
+                      next tick resets ───┘
+```
+
+---
+
+## Peer dependencies
+
+| Package  | Version   | Dialect      |
+| -------- | --------- | ------------ |
+| `redis`  | `>=4.0.0` | `"redis"`    |
+| `pg`     | `>=8.0.0` | `"postgres"` |
+| `mysql2` | `>=3.0.0` | `"mysql"`    |
+
+Install only the package you need. `croner` is a direct dependency — it is always installed automatically.
 
 ---
 
 ## License
 
-MIT — [LICENSE](./LICENSE)
-
-## Donation
-
-If this project has been useful to you, consider supporting it with a coffee.
-
-**BTC:** `12dxgVQ3sRFhc4g7M6oydsN2tTMMthJJqS`
+MIT © Rafid Ahmed

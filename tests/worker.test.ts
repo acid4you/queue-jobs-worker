@@ -1,835 +1,414 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
-import { QueueClient } from "../src/core/client.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { QueueClient } from "../src/classes/client.js";
+import { Queue } from "../src/classes/queue.js";
+import { Worker } from "../src/classes/worker.js";
+import type { Job } from "../src/types/job.types.js";
+
+// ─── helpers ──────────────────────────────────────────────────────────────────
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-describe("Worker", () => {
-  let client: QueueClient;
+function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 10_000,
+  interval = 20,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    const check = async () => {
+      if (await predicate()) return resolve();
+      if (Date.now() - start >= timeoutMs) return reject(new Error("waitFor timed out"));
+      setTimeout(check, interval);
+    };
+    void check();
+  });
+}
 
-  afterEach(async () => {
-    await client.close();
+// ─── setup ────────────────────────────────────────────────────────────────────
+
+let client: QueueClient;
+
+beforeEach(async () => {
+  QueueClient.clearDefaultClient();
+  client = new QueueClient({
+    dialect: "memory",
+    options: { attempts: 3, retryDelay: 50, backoff: "fixed", timeout: 2000 },
+  });
+  await client.init();
+});
+
+afterEach(async () => {
+  if (client.isInitialized()) await client.close();
+  QueueClient.clearDefaultClient();
+});
+
+// ─── construction ─────────────────────────────────────────────────────────────
+
+describe("Worker — construction", () => {
+  it("takes a Queue and handler", () => {
+    const queue = new Queue("ctor", client);
+    const worker = new Worker(queue, async () => "ok");
+    expect(worker.queue).toBe(queue);
+    expect(worker.isRunning()).toBe(false);
   });
 
-  it("processes a job successfully", async () => {
-    client = new QueueClient({ defaults: { pollInterval: 50 } });
-    const queue = client.createQueue<{ n: number }>("proc");
-    const processed = vi.fn();
+  it("does NOT expose add/get/remove/list/count (those live on Queue)", () => {
+    const queue = new Queue("api", client);
+    const worker = new Worker(queue, async () => "ok");
+    expect((worker as Record<string, unknown>).add).toBeUndefined();
+    expect((worker as Record<string, unknown>).get).toBeUndefined();
+    expect((worker as Record<string, unknown>).remove).toBeUndefined();
+    expect((worker as Record<string, unknown>).list).toBeUndefined();
+    expect((worker as Record<string, unknown>).count).toBeUndefined();
+  });
 
-    queue.process("add", async (job) => {
-      processed(job.data.n);
+  it("concurrency option is stored (Worker-only concern)", () => {
+    const queue = new Queue("conc", client);
+    const worker = new Worker(queue, async () => "ok", { concurrency: 4 });
+    // concurrency is private — just verify it doesn't throw and worker works
+    expect(worker.isRunning()).toBe(false);
+  });
+});
+
+// ─── success path ─────────────────────────────────────────────────────────────
+
+describe("Worker — successful processing", () => {
+  it("processes a job and marks it completed", async () => {
+    const queue = new Queue<{ n: number }, number>("success", client);
+    const worker = new Worker(queue, async (job) => job.data.n * 2);
+    worker.start();
+
+    const job = await queue.add("double", { n: 21 });
+    await waitFor(async () => (await queue.get(job.id))?.status === "completed");
+
+    const done = await queue.get(job.id);
+    expect(done?.status).toBe("completed");
+    expect(done?.result).toBe(42);
+    expect(done?.finishedAt).toBeDefined();
+
+    await worker.close();
+  });
+
+  it("emits 'active' then 'completed'", async () => {
+    const queue = new Queue<{ x: number }, number>("events", client);
+    const worker = new Worker(queue, async (job) => job.data.x + 1);
+
+    const events: string[] = [];
+    worker.on("active", () => events.push("active"));
+    worker.on("completed", () => events.push("completed"));
+    worker.start();
+
+    const job = await queue.add("inc", { x: 9 });
+    await waitFor(async () => (await queue.get(job.id))?.status === "completed");
+
+    expect(events).toEqual(["active", "completed"]);
+    await worker.close();
+  });
+
+  it("stores the handler return value in job.result", async () => {
+    const queue = new Queue<{ name: string }, string>("result", client);
+    const worker = new Worker(queue, async (job) => `Hello, ${job.data.name}!`);
+    worker.start();
+
+    const job = await queue.add("greet", { name: "World" });
+    await waitFor(async () => (await queue.get(job.id))?.status === "completed");
+
+    expect((await queue.get(job.id))?.result).toBe("Hello, World!");
+    await worker.close();
+  });
+
+  it("emits 'started' and 'stopped'", async () => {
+    const queue = new Queue("lifecycle", client);
+    const worker = new Worker(queue, async () => "ok");
+    const events: string[] = [];
+    worker.on("started", () => events.push("started"));
+    worker.on("stopped", () => events.push("stopped"));
+    worker.start();
+    await worker.close();
+    expect(events).toContain("started");
+    expect(events).toContain("stopped");
+  });
+
+  it("removeOnComplete deletes the job from storage", async () => {
+    const queue = new Queue("rm-ok", client);
+    const worker = new Worker(queue, async () => "done");
+    worker.start();
+
+    const job = await queue.add("rm", {}, { removeOnComplete: true });
+    await waitFor(async () => (await queue.get(job.id)) === undefined);
+
+    expect(await queue.get(job.id)).toBeUndefined();
+    await worker.close();
+  });
+});
+
+// ─── retry / failure ──────────────────────────────────────────────────────────
+
+describe("Worker — retries and failure", () => {
+  it("retries up to the attempt limit then marks failed", async () => {
+    const queue = new Queue("retry", client);
+    const worker = new Worker(queue, async () => {
+      throw new Error("always fails");
     });
+    worker.start();
 
-    await queue.enqueue("add", { n: 42 });
-    const worker = queue.createWorker({ concurrency: 1 });
+    const job = await queue.add("bad", {}, { attempts: 3 });
+    await waitFor(async () => (await queue.get(job.id))?.status === "failed", 15_000);
 
-    await sleep(300);
+    const failed = await queue.get(job.id);
+    expect(failed?.status).toBe("failed");
+    expect(failed?.attemptsMade).toBe(3);
+    expect(failed?.error).toMatch("always fails");
+    expect(failed?.finishedAt).toBeDefined();
 
-    expect(processed).toHaveBeenCalledWith(42);
-    await worker.stop();
+    await worker.close();
   });
 
-  it("emits job:completed on success", async () => {
-    client = new QueueClient({ defaults: { pollInterval: 50 } });
-    const queue = client.createQueue("completed-test");
-    const completedListener = vi.fn();
-    client.on("job:completed", completedListener);
-
-    queue.process("noop", async () => {});
-    await queue.enqueue("noop", {});
-    const worker = queue.createWorker();
-
-    await sleep(300);
-    expect(completedListener).toHaveBeenCalledOnce();
-    await worker.stop();
-  });
-
-  it("retries a failing job", async () => {
-    client = new QueueClient({ defaults: { pollInterval: 50, retryDelay: 10 } });
-    const queue = client.createQueue("retry-test");
-    const attempts = vi.fn();
-
-    queue.process("fail", async () => {
-      attempts();
+  it("emits 'error' per attempt and 'failed' once", async () => {
+    const queue = new Queue("err-events", client);
+    const worker = new Worker(queue, async () => {
       throw new Error("boom");
     });
+    const errors: Error[] = [];
+    const failedJ: Job[] = [];
+    worker.on("error", (_, e) => errors.push(e));
+    worker.on("failed", (j) => failedJ.push(j as Job));
+    worker.start();
 
-    await queue.enqueue("fail", {}, { attempts: 3, retryDelay: 10 });
-    const worker = queue.createWorker({ concurrency: 1 });
+    const job = await queue.add("boom", {}, { attempts: 2 });
+    await waitFor(async () => (await queue.get(job.id))?.status === "failed", 10_000);
 
-    await sleep(800);
-
-    // Should have attempted 3 times then moved to DLQ.
-    expect(attempts.mock.calls.length).toBeGreaterThanOrEqual(2);
-    await worker.stop();
+    expect(errors).toHaveLength(2);
+    expect(failedJ).toHaveLength(1);
+    expect(failedJ[0]!.status).toBe("failed");
+    await worker.close();
   });
 
-  it("stores delayed retry with delayed status and immediate retry with waiting status", async () => {
-    client = new QueueClient({ defaults: { pollInterval: 50 } });
-    const queue = client.createQueue("retry-status-test");
-
-    const retryingStatuses: { type: string; status: string }[] = [];
-    client.on("job:retrying", (jobData) => {
-      retryingStatuses.push({ type: jobData.type, status: jobData.status });
+  it("stores error message and stacktrace on the job", async () => {
+    const queue = new Queue("stack", client);
+    const worker = new Worker(queue, async () => {
+      throw new Error("oh no");
     });
+    worker.start();
 
-    queue.process("fail-delayed", async () => {
-      throw new Error("retry me delayed");
-    });
-    queue.process("fail-immediate", async () => {
-      throw new Error("retry me immediate");
-    });
+    const job = await queue.add("bad", {}, { attempts: 1 });
+    await waitFor(async () => (await queue.get(job.id))?.status === "failed", 5_000);
 
-    // Job 1: delayed retry (retryDelay = 60000ms)
-    await queue.enqueue("fail-delayed", {}, { attempts: 2, retryDelay: 60000 });
-    // Job 2: immediate retry (retryDelay = 0ms)
-    await queue.enqueue("fail-immediate", {}, { attempts: 2, retryDelay: 0 });
-
-    const worker = queue.createWorker({ concurrency: 2 });
-    await sleep(300);
-
-    const delayedRetry = retryingStatuses.find((item) => item.type === "fail-delayed");
-    const immediateRetry = retryingStatuses.find((item) => item.type === "fail-immediate");
-
-    expect(delayedRetry?.status).toBe("delayed");
-    expect(immediateRetry?.status).toBe("waiting");
-
-    await worker.stop();
+    const failed = await queue.get(job.id);
+    expect(failed?.error).toBe("oh no");
+    expect(failed?.stacktrace).toContain("Error: oh no");
+    await worker.close();
   });
 
-  it("moves job to DLQ after exhausting attempts", async () => {
-    client = new QueueClient({ defaults: { pollInterval: 50 } });
-    const queue = client.createQueue("dlq-test");
-    const deadListener = vi.fn();
-    client.on("job:dead", deadListener);
-
-    queue.process("crash", async () => {
-      throw new Error("fatal");
+  it("removeOnFail deletes the job from storage", async () => {
+    const queue = new Queue("rm-fail", client);
+    const worker = new Worker(queue, async () => {
+      throw new Error("gone");
     });
-    await queue.enqueue("crash", {}, { attempts: 1, retryDelay: 0 });
-    const worker = queue.createWorker({ concurrency: 1 });
+    worker.start();
 
-    await sleep(400);
-    expect(deadListener).toHaveBeenCalledOnce();
-    await worker.stop();
+    const job = await queue.add("rm", {}, { attempts: 1, removeOnFail: true });
+    await waitFor(async () => (await queue.get(job.id)) === undefined, 5_000);
+
+    expect(await queue.get(job.id)).toBeUndefined();
+    await worker.close();
   });
 
-  it("respects concurrency limit", async () => {
-    client = new QueueClient({ defaults: { pollInterval: 50 } });
-    const queue = client.createQueue("concurrency-test");
+  it("attempts: 0 means unlimited — retries until success", async () => {
+    let calls = 0;
+    const queue = new Queue("unlimited", client);
+    const worker = new Worker(queue, async () => {
+      calls++;
+      if (calls < 4) throw new Error("not yet");
+      return "finally";
+    });
+    worker.start();
+
+    const job = await queue.add("eventually", {}, { attempts: 0 });
+    await waitFor(async () => (await queue.get(job.id))?.status === "completed", 15_000);
+
+    expect((await queue.get(job.id))?.status).toBe("completed");
+    expect(calls).toBe(4);
+    await worker.close();
+  });
+});
+
+// ─── timeout ──────────────────────────────────────────────────────────────────
+
+describe("Worker — timeout", () => {
+  it("fails a job that exceeds the timeout", async () => {
+    const shortClient = new QueueClient({
+      dialect: "memory",
+      options: { attempts: 1, timeout: 100 },
+    });
+    await shortClient.init();
+
+    const queue = new Queue("timeout-q", shortClient);
+    const worker = new Worker(queue, async () => {
+      await sleep(500);
+      return "too slow";
+    });
+    worker.start();
+
+    const job = await queue.add("slow", {});
+    await waitFor(async () => (await queue.get(job.id))?.status === "failed", 5_000);
+
+    const failed = await queue.get(job.id);
+    expect(failed?.status).toBe("failed");
+    expect(failed?.error).toMatch("timed out");
+
+    await worker.close();
+    await shortClient.close();
+  });
+});
+
+// ─── concurrency ──────────────────────────────────────────────────────────────
+
+describe("Worker — concurrency", () => {
+  it("respects the concurrency ceiling", async () => {
     let concurrent = 0;
     let maxConcurrent = 0;
 
-    queue.process("slow", async () => {
-      concurrent++;
-      maxConcurrent = Math.max(maxConcurrent, concurrent);
-      await sleep(100);
-      concurrent--;
-    });
-
-    for (let i = 0; i < 6; i++) {
-      await queue.enqueue("slow", {});
-    }
-
-    const worker = queue.createWorker({ concurrency: 2 });
-    await sleep(800);
-    expect(maxConcurrent).toBeLessThanOrEqual(2);
-    await worker.stop();
-  });
-
-  it("worker graceful stop", async () => {
-    client = new QueueClient({ defaults: { pollInterval: 50 } });
-    const queue = client.createQueue("stop-test");
-    queue.process("task", async () => {
-      await sleep(50);
-    });
-    await queue.enqueue("task", {});
-    const worker = queue.createWorker();
-
-    await sleep(80);
-    await worker.stop();
-    expect(worker.status).toBe("stopped");
-  });
-
-  it("job released via releaseLock during shutdown is recovered by recoverStalledJobs", async () => {
-    // Regression test for: releaseLock() leaving jobs permanently stuck in
-    // "active" status because lockExpiresAt was set to null/empty, causing
-    // recoverStalledJobs() to skip them (issue #1).
-    //
-    // We test releaseLock() directly on the adapter rather than going through
-    // the full worker shutdown cycle, because executeJob() runs fire-and-forget
-    // and its finally{} block can race against the post-stop assertions.
-    const { InMemoryStorageAdapter } = await import("../src/storage/in-memory.adapter.js");
-    const adapter = new InMemoryStorageAdapter();
-    await adapter.initialize();
-
-    const enqueuedJob = await adapter.enqueue({
-      id: "test-release-job",
-      queue: "release-lock-test",
-      type: "long-task",
-      payload: {},
-      maxAttempts: 3,
-      retryDelay: 1000,
-      backoff: "exponential",
-      timeout: 30_000,
-      priority: 0,
-      runAt: new Date(Date.now() - 1).toISOString(),
-    });
-
-    // Claim it so it becomes active.
-    const claimed = await adapter.claim({
-      queue: "release-lock-test",
-      lockId: "worker-1",
-      lockDuration: 60_000,
-      now: new Date().toISOString(),
-    });
-    expect(claimed).not.toBeNull();
-    expect(claimed!.status).toBe("active");
-
-    // Simulate what worker.stop() does when shutdownTimeout elapses.
-    await adapter.releaseLock(enqueuedJob.id);
-
-    // --- Core assertions ---
-
-    // Job must remain "active" (not silently transitioned away).
-    const afterRelease = await adapter.getJob(enqueuedJob.id);
-    expect(afterRelease!.status).toBe("active");
-
-    // lockExpiresAt must be non-null AND already-expired so that
-    // recoverStalledJobs() can match it — NOT null or empty string.
-    expect(afterRelease!.lockExpiresAt).not.toBeNull();
-    expect(afterRelease!.lockExpiresAt).not.toBe("");
-    const lockExpiry = new Date(afterRelease!.lockExpiresAt!).getTime();
-    expect(lockExpiry).toBeLessThanOrEqual(Date.now());
-
-    // recoverStalledJobs() must reclaim the job.
-    const recovered = await adapter.recoverStalledJobs(
-      "release-lock-test",
-      new Date().toISOString(),
+    const queue = new Queue("conc-q", client);
+    const worker = new Worker(
+      queue,
+      async () => {
+        concurrent++;
+        maxConcurrent = Math.max(maxConcurrent, concurrent);
+        await sleep(80);
+        concurrent--;
+        return "ok";
+      },
+      { concurrency: 3 },
     );
-    expect(recovered).toContain(enqueuedJob.id);
+    worker.start();
 
-    // After recovery the job must be back to "waiting" — reclaimable.
-    const afterRecovery = await adapter.getJob(enqueuedJob.id);
-    expect(afterRecovery!.status).toBe("waiting");
-    expect(afterRecovery!.lockId).toBeNull();
-    expect(afterRecovery!.lockExpiresAt).toBeNull();
+    await Promise.all(Array.from({ length: 6 }, (_, i) => queue.add(`j${i}`, {})));
 
-    await adapter.close();
-  });
+    await waitFor(async () => (await queue.list("completed")).length === 6, 10_000);
+    await worker.close();
 
-  it("rate limit quota is not consumed when the queue is empty", async () => {
-    // Regression test for: rate-limit counter incremented on every poll cycle
-    // even when no jobs are available, exhausting the quota before any real
-    // work is done (issue #4).
-    //
-    // Strategy: configure a limit of 2 jobs per 10-second window and let the
-    // worker poll an empty queue several times.  Then enqueue 2 jobs and
-    // verify both are processed — if the bug were present the quota would
-    // already be exhausted and neither job would run.
-    const { InMemoryStorageAdapter } = await import("../src/storage/in-memory.adapter.js");
-    const adapter = new InMemoryStorageAdapter();
-    await adapter.initialize();
-
-    client = new QueueClient({
-      adapter,
-      defaults: { pollInterval: 30 },
-    });
-
-    const queue = client.createQueue("rate-limit-empty-test", {
-      rateLimit: { max: 2, duration: 10_000 },
-    });
-
-    const processed = vi.fn();
-    queue.process("task", async () => {
-      processed();
-    });
-
-    // Start the worker with an empty queue and let it poll several times,
-    // which would exhaust the quota under the old (buggy) implementation.
-    const worker = queue.createWorker({ concurrency: 2 });
-    await sleep(200); // ~6 poll cycles with no jobs
-
-    // Now add 2 jobs — both should be processed within the same rate-limit
-    // window because no quota was consumed during the empty polls.
-    await queue.enqueue("task", {});
-    await queue.enqueue("task", {});
-    await sleep(300);
-
-    expect(processed).toHaveBeenCalledTimes(2);
-    await worker.stop();
-  });
-
-  it("emits job:failed on processor error", async () => {
-    client = new QueueClient({ defaults: { pollInterval: 50 } });
-    const queue = client.createQueue("fail-event");
-    const failedListener = vi.fn();
-    client.on("job:failed", failedListener);
-
-    queue.process("err", async () => {
-      throw new Error("oops");
-    });
-    await queue.enqueue("err", {}, { attempts: 1 });
-    const worker = queue.createWorker({ concurrency: 1 });
-
-    await sleep(300);
-    expect(failedListener).toHaveBeenCalledOnce();
-    await worker.stop();
+    expect(maxConcurrent).toBeGreaterThanOrEqual(2);
+    expect(maxConcurrent).toBeLessThanOrEqual(3);
   });
 });
 
-describe("Worker — cron scheduling (issue #5)", () => {
-  let client: QueueClient;
+// ─── delayed jobs ─────────────────────────────────────────────────────────────
 
-  afterEach(async () => {
-    if (client) await client.close();
-  });
+describe("Worker — delayed jobs", () => {
+  it("does not process a job before its runAt", async () => {
+    const queue = new Queue("delay-q", client);
+    const worker = new Worker(queue, async () => "done");
+    worker.start();
 
-  // ---------------------------------------------------------------------------
-  // Test: invalid cron expression → worker:error emitted, no 60-second job
-  // ---------------------------------------------------------------------------
+    const job = await queue.add("future", {}, { delay: 500 });
 
-  it("emits worker:error and does not re-enqueue on an invalid cron expression", async () => {
-    // Regression for issue #5: before the fix a croner load/init failure
-    // silently fell back to a 1-minute (60 000 ms) runAt, so invalid
-    // expressions would still produce a re-enqueued job.
+    await sleep(100);
+    const still = await queue.get(job.id);
+    expect(still?.status).not.toBe("completed");
 
-    const { InMemoryStorageAdapter } = await import("../src/storage/in-memory.adapter.js");
-    const { QueueEventEmitter } = await import("../src/events/emitter.js");
-    const { Worker } = await import("../src/core/worker.js");
-
-    const adapter = new InMemoryStorageAdapter();
-    await adapter.initialize();
-    const emitter = new QueueEventEmitter();
-    const processors = new Map();
-
-    const worker = new Worker(
-      "cron-invalid-test",
-      adapter,
-      emitter,
-      processors,
-      {},
-      { pollInterval: 50_000 },
-      {
-        concurrency: 1,
-        attempts: 1,
-        retryDelay: 0,
-        backoff: "fixed",
-        timeout: 5_000,
-        pollInterval: 50_000,
-        stalledInterval: 60_000,
-        lockDuration: 30_000,
-        rateLimit: undefined,
-      },
-    );
-
-    const workerErrors: Error[] = [];
-    emitter.on("worker:error", (_workerId, err) => {
-      workerErrors.push(err);
-    });
-
-    // Enqueue a job with an intentionally broken cron expression.
-    const raw = await adapter.enqueue({
-      id: "cron-invalid-job",
-      queue: "cron-invalid-test",
-      type: "task",
-      payload: {},
-      maxAttempts: 1,
-      retryDelay: 0,
-      backoff: "fixed",
-      timeout: 5_000,
-      priority: 0,
-      runAt: new Date(Date.now() - 1).toISOString(),
-      cron: "NOT A VALID CRON",
-    });
-
-    // Access the private method via type cast to test it in isolation.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (worker as any).enqueueCronNext({
-      id: raw.id,
-      _data: raw,
-      cron: raw.cron,
-      type: raw.type,
-      maxAttempts: raw.maxAttempts,
-      retryDelay: raw.retryDelay,
-      backoff: raw.backoff,
-      timeout: raw.timeout,
-      priority: raw.priority,
-    });
-
-    // Must have emitted exactly one worker:error.
-    expect(workerErrors).toHaveLength(1);
-
-    // The error message must describe the problem — NOT a generic fallback.
-    expect(workerErrors[0]!.message).not.toContain("60");
-
-    // Must NOT have re-enqueued a follow-up job (queue should still have only
-    // the original job, and it is still in its original status).
-    const jobs = await adapter.getJobs({ queue: "cron-invalid-test", limit: 100, offset: 0 });
-    expect(jobs).toHaveLength(1);
-    expect(jobs[0]!.id).toBe("cron-invalid-job");
-
-    // Verify no job was scheduled ~60 seconds out (the old fallback behaviour).
-    const sixtySecondsFromNow = Date.now() + 55_000; // 5 s tolerance
-    const fallbackJob = jobs.find((j) => new Date(j.runAt).getTime() >= sixtySecondsFromNow);
-    expect(fallbackJob).toBeUndefined();
-
-    await adapter.close();
-  });
-
-  // ---------------------------------------------------------------------------
-  // Test: valid expression → runAt is NOT ~60 seconds (real schedule used)
-  // ---------------------------------------------------------------------------
-
-  it("schedules the next cron occurrence using the real expression, not a 60-second fallback", async () => {
-    const { InMemoryStorageAdapter } = await import("../src/storage/in-memory.adapter.js");
-    const { QueueEventEmitter } = await import("../src/events/emitter.js");
-    const { Worker } = await import("../src/core/worker.js");
-
-    const adapter = new InMemoryStorageAdapter();
-    await adapter.initialize();
-    const emitter = new QueueEventEmitter();
-    const processors = new Map();
-
-    const worker = new Worker(
-      "cron-valid-test",
-      adapter,
-      emitter,
-      processors,
-      {},
-      { pollInterval: 50_000 },
-      {
-        concurrency: 1,
-        attempts: 1,
-        retryDelay: 0,
-        backoff: "fixed",
-        timeout: 5_000,
-        pollInterval: 50_000,
-        stalledInterval: 60_000,
-        lockDuration: 30_000,
-        rateLimit: undefined,
-      },
-    );
-
-    const workerErrors: Error[] = [];
-    emitter.on("worker:error", (_workerId, err) => {
-      workerErrors.push(err);
-    });
-
-    // "0 2 * * *" = daily at 02:00 — next occurrence is always > 1 minute away.
-    const raw = await adapter.enqueue({
-      id: "cron-valid-job",
-      queue: "cron-valid-test",
-      type: "task",
-      payload: {},
-      maxAttempts: 1,
-      retryDelay: 0,
-      backoff: "fixed",
-      timeout: 5_000,
-      priority: 0,
-      runAt: new Date(Date.now() - 1).toISOString(),
-      cron: "0 2 * * *",
-    });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (worker as any).enqueueCronNext({
-      id: raw.id,
-      _data: raw,
-      cron: raw.cron,
-      type: raw.type,
-      maxAttempts: raw.maxAttempts,
-      retryDelay: raw.retryDelay,
-      backoff: raw.backoff,
-      timeout: raw.timeout,
-      priority: raw.priority,
-    });
-
-    // No errors should have been emitted.
-    expect(workerErrors).toHaveLength(0);
-
-    // A second job should now exist — the re-enqueued next occurrence.
-    const jobs = await adapter.getJobs({ queue: "cron-valid-test", limit: 100, offset: 0 });
-    expect(jobs).toHaveLength(2);
-
-    const nextJob = jobs.find((j) => j.id !== "cron-valid-job");
-    expect(nextJob).toBeDefined();
-
-    // runAt must be more than 60 seconds in the future — proving the real
-    // cron expression was used rather than the old 1-minute fallback.
-    const runAtMs = new Date(nextJob!.runAt).getTime();
-    const sixtySecondsFromNow = Date.now() + 60_000;
-    expect(runAtMs).toBeGreaterThan(sixtySecondsFromNow);
-
-    // The next occurrence should also preserve the cron expression.
-    expect(nextJob!.cron).toBe("0 2 * * *");
-
-    await adapter.close();
-  });
-
-  // ---------------------------------------------------------------------------
-  // Test: croner error must not crash the worker process
-  // ---------------------------------------------------------------------------
-
-  it("does not crash the worker when enqueueCronNext encounters an error", async () => {
-    client = new QueueClient({ defaults: { pollInterval: 50 } });
-    const queue = client.createQueue("cron-no-crash");
-
-    const completed = vi.fn();
-    const workerErrors: Error[] = [];
-
-    client.on("job:completed", completed);
-    client.on("worker:error", (_id, err) => workerErrors.push(err));
-
-    // Register a processor for the cron job type.
-    queue.process("daily", async () => {
-      // Processor succeeds — enqueueCronNext will then run with an invalid
-      // expression and must emit worker:error without crashing the worker.
-    });
-
-    // Enqueue with a broken cron expression so enqueueCronNext will fail.
-    await queue.enqueue("daily", {}, { schedule: { cron: "BROKEN_EXPR" } });
-
-    const worker = queue.createWorker({ concurrency: 1 });
-
-    await sleep(500);
-
-    // The job itself must complete successfully.
-    expect(completed).toHaveBeenCalledOnce();
-
-    // A worker:error must have been emitted for the cron scheduling failure.
-    expect(workerErrors.length).toBeGreaterThan(0);
-
-    // The worker must still be running — the cron error must not have stopped it.
-    expect(worker.status).toBe("running");
-
-    await worker.stop();
-    expect(worker.status).toBe("stopped");
-  });
-
-  it("renews lock during execution so long-running processor is not reclaimed by another worker", async () => {
-    client = new QueueClient({
-      defaults: {
-        lockDuration: 200,
-        stalledInterval: 50,
-        pollInterval: 50,
-      },
-    });
-
-    const queue = client.createQueue("long-job-test", {
-      lockDuration: 200,
-      stalledInterval: 50,
-      pollInterval: 50,
-    });
-
-    const executionCount = vi.fn();
-
-    queue.process("long-job", async () => {
-      executionCount();
-      // Processor takes 600ms, which is 3x the lockDuration of 200ms
-      await sleep(600);
-    });
-
-    await queue.enqueue("long-job", { to: "user@example.com" });
-
-    // Start two workers on the same queue
-    const worker1 = queue.createWorker({ concurrency: 1 });
-    const worker2 = queue.createWorker({ concurrency: 1 });
-
-    // Wait 900ms for job processing to finish completely
-    await sleep(900);
-
-    // The job should only be processed ONCE by worker 1, not reclaimed by worker 2
-    expect(executionCount).toHaveBeenCalledOnce();
-
-    await worker1.stop();
-    await worker2.stop();
+    await waitFor(async () => (await queue.get(job.id))?.status === "completed", 5_000);
+    await worker.close();
   });
 });
 
-describe("Worker — job timeout cancellation (issue #12)", () => {
-  let client: QueueClient;
+// ─── priority ordering ────────────────────────────────────────────────────────
 
-  afterEach(async () => {
-    if (client) await client.close();
+describe("Worker — priority ordering", () => {
+  it("processes lower-number priority first (concurrency 1)", async () => {
+    const processed: string[] = [];
+    const queue = new Queue<{ name: string }>("prio-q", client);
+    const worker = new Worker(
+      queue,
+      async (job) => {
+        processed.push(job.data.name);
+        await sleep(20);
+      },
+      { concurrency: 1 },
+    );
+
+    // Add all three before starting so Worker picks them in order.
+    await queue.add("low", { name: "low" }, { priority: 10 });
+    await queue.add("high", { name: "high" }, { priority: 1 });
+    await queue.add("mid", { name: "mid" }, { priority: 5 });
+
+    worker.start();
+    await waitFor(async () => (await queue.list("completed")).length === 3, 10_000);
+    await worker.close();
+
+    expect(processed[0]).toBe("high");
+    expect(processed[1]).toBe("mid");
+    expect(processed[2]).toBe("low");
+  });
+});
+
+// ─── graceful close ───────────────────────────────────────────────────────────
+
+describe("Worker — graceful close", () => {
+  it("close() on a never-started worker is a no-op", async () => {
+    const queue = new Queue("noop", client);
+    const worker = new Worker(queue, async () => "ok");
+    await expect(worker.close()).resolves.toBeUndefined();
   });
 
-  it("passes an AbortSignal as second argument to the processor", async () => {
-    client = new QueueClient({ defaults: { pollInterval: 30 } });
-    const queue = client.createQueue("signal-param-test");
-    let receivedSignal: AbortSignal | null = null;
-
-    queue.process("task", async (_job, signal) => {
-      receivedSignal = signal;
-    });
-
-    await queue.enqueue("task", {});
-    const worker = queue.createWorker();
-
-    await sleep(200);
-
-    expect(receivedSignal).toBeInstanceOf(AbortSignal);
-    expect(receivedSignal!.aborted).toBe(false);
-
-    await worker.stop();
+  it("start() is idempotent", async () => {
+    const queue = new Queue("idempotent", client);
+    const worker = new Worker(queue, async () => "ok");
+    worker.start();
+    worker.start(); // second call is a no-op
+    expect(worker.isRunning()).toBe(true);
+    await worker.close();
   });
 
-  it("aborts the AbortSignal when job timeout is reached", async () => {
-    client = new QueueClient({ defaults: { pollInterval: 30 } });
-    const queue = client.createQueue("timeout-abort-test", {
-      timeout: 100,
-      attempts: 1,
+  it("waits for in-flight jobs before resolving", async () => {
+    let finished = 0;
+    const queue = new Queue("drain", client);
+    const worker = new Worker(queue, async () => {
+      await sleep(60);
+      finished++;
+      return "ok";
     });
+    worker.start();
 
-    let signalAborted = false;
-    let abortReason: Error | null = null;
+    await queue.add("t1", {});
+    await queue.add("t2", {});
 
-    queue.process("slow-job", async (_job, signal) => {
-      signal.addEventListener("abort", () => {
-        signalAborted = true;
-        abortReason = signal.reason as Error;
-      });
+    // Wait until at least one job is active before triggering close.
+    await waitFor(async () => (await queue.list("active")).length > 0);
 
-      // Sleep longer than the 100ms timeout
-      await sleep(300);
-    });
-
-    await queue.enqueue("slow-job", {}, { timeout: 100, attempts: 1 });
-    const worker = queue.createWorker();
-
-    await sleep(350);
-
-    expect(signalAborted).toBe(true);
-    expect(abortReason).toBeDefined();
-    expect(abortReason!.message).toContain("Job timed out after 100ms");
-
-    await worker.stop();
+    await worker.close();
+    expect(finished).toBeGreaterThanOrEqual(1);
   });
 
-  it("allows processor to cooperatively cancel background work on timeout", async () => {
-    client = new QueueClient({ defaults: { pollInterval: 30 } });
-    const queue = client.createQueue("cooperative-cancel-test", {
-      timeout: 100,
-      attempts: 2,
-      retryDelay: 100,
-    });
-
-    let backgroundTaskFinished = false;
-
-    queue.process("slow-job", async (_job, signal) => {
-      for (let i = 0; i < 10; i++) {
-        if (signal.aborted) {
-          // Cooperative cancellation exit
-          return;
-        }
-        await sleep(50);
-      }
-      backgroundTaskFinished = true;
-    });
-
-    await queue.enqueue("slow-job", {}, { timeout: 100, attempts: 1 });
-    const worker = queue.createWorker();
-
-    // Wait past timeout (100ms) and potential loop duration (500ms)
-    await sleep(600);
-
-    expect(backgroundTaskFinished).toBe(false);
-
-    await worker.stop();
+  it("start() after close() throws", async () => {
+    const queue = new Queue("restart", client);
+    const worker = new Worker(queue, async () => "ok");
+    await worker.close();
+    expect(() => worker.start()).toThrow("closed");
   });
 
-  // ---------------------------------------------------------------------------
-  // Durable & Recoverable Cron Job Rescheduling Tests
-  // ---------------------------------------------------------------------------
+  it("isClosed() is false before close and true after", async () => {
+    const queue = new Queue("closed-flag", client);
+    const worker = new Worker(queue, async () => "ok");
+    expect(worker.isClosed()).toBe(false);
+    await worker.close();
+    expect(worker.isClosed()).toBe(true);
+  });
 
-  describe("Durable Cron Rescheduling & Recovery", () => {
-    it("generates deterministic and bounded cron next job IDs", async () => {
-      const { generateCronNextJobId } = await import("../src/core/worker.js");
-      const nextDate = new Date("2026-09-19T03:00:00.000Z");
-      const ts = nextDate.getTime();
+  it("object result is stored correctly (composite TResult)", async () => {
+    const queue = new Queue<{ n: number }, { doubled: number }>("obj-result", client);
+    const worker = new Worker(queue, async (job) => ({ doubled: job.data.n * 2 }));
+    worker.start();
 
-      // Root job ID -> cron:job-1:<timestamp>
-      const id1 = generateCronNextJobId("job-1", nextDate);
-      expect(id1).toBe(`cron:job-1:${ts}`);
+    const job = await queue.add("calc", { n: 21 });
+    await waitFor(async () => (await queue.get(job.id))?.status === "completed");
 
-      // Sub-occurrence job ID -> cron:job-1:<nextTimestamp> (doesn't nest prefixes)
-      const nextDate2 = new Date("2026-09-20T03:00:00.000Z");
-      const ts2 = nextDate2.getTime();
-      const id2 = generateCronNextJobId(id1, nextDate2);
-      expect(id2).toBe(`cron:job-1:${ts2}`);
-    });
-
-    it("retries transient storage.enqueue errors during cron rescheduling in-band", async () => {
-      const { InMemoryStorageAdapter } = await import("../src/storage/in-memory.adapter.js");
-      const { QueueEventEmitter } = await import("../src/events/emitter.js");
-      const { Worker } = await import("../src/core/worker.js");
-
-      const adapter = new InMemoryStorageAdapter();
-      await adapter.initialize();
-
-      let enqueueAttempts = 0;
-      const originalEnqueue = adapter.enqueue.bind(adapter);
-      // Fail the first enqueue attempt for the next occurrence, succeed on retry
-      adapter.enqueue = async (input) => {
-        if (input.id.startsWith("cron:")) {
-          enqueueAttempts++;
-          if (enqueueAttempts === 1) {
-            throw new Error("Transient storage connection error");
-          }
-        }
-        return originalEnqueue(input);
-      };
-
-      const emitter = new QueueEventEmitter();
-      const processors = new Map();
-
-      const worker = new Worker(
-        "cron-transient-test",
-        adapter,
-        emitter,
-        processors,
-        {},
-        { pollInterval: 50 },
-        {
-          concurrency: 1,
-          attempts: 1,
-          retryDelay: 0,
-          backoff: "fixed",
-          timeout: 5_000,
-          pollInterval: 50,
-          stalledInterval: 60_000,
-          lockDuration: 30_000,
-          rateLimit: undefined,
-        },
-      );
-
-      const workerErrors: Error[] = [];
-      emitter.on("worker:error", (_id, err) => workerErrors.push(err));
-
-      const raw = await originalEnqueue({
-        id: "cron-transient-job",
-        queue: "cron-transient-test",
-        type: "task",
-        payload: {},
-        maxAttempts: 1,
-        retryDelay: 0,
-        backoff: "fixed",
-        timeout: 5_000,
-        priority: 0,
-        runAt: new Date(Date.now() - 100).toISOString(),
-        cron: "0 2 * * *",
-      });
-
-      // Execute enqueueCronNext
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (worker as any).enqueueCronNext({
-        id: raw.id,
-        _data: raw,
-        cron: raw.cron,
-        type: raw.type,
-        maxAttempts: raw.maxAttempts,
-        retryDelay: raw.retryDelay,
-        backoff: raw.backoff,
-        timeout: raw.timeout,
-        priority: raw.priority,
-        runAt: raw.runAt,
-      });
-
-      // The transient error was emitted during retry 1
-      expect(workerErrors).toHaveLength(1);
-      expect(workerErrors[0]!.message).toContain("Transient storage connection error");
-
-      // Next occurrence was created on retry 2
-      const jobs = await adapter.getJobs({ queue: "cron-transient-test", limit: 10 });
-      expect(jobs).toHaveLength(2);
-
-      await adapter.close();
-    });
-
-    it("recreates missed cron occurrences via recoverCronJobs after storage failure or worker restart", async () => {
-      const { InMemoryStorageAdapter } = await import("../src/storage/in-memory.adapter.js");
-      const { QueueEventEmitter } = await import("../src/events/emitter.js");
-      const { Worker } = await import("../src/core/worker.js");
-
-      const adapter = new InMemoryStorageAdapter();
-      await adapter.initialize();
-
-      // Enqueue a completed cron job where next occurrence was NOT enqueued (e.g. storage outage)
-      const now = new Date();
-      const pastRunAt = new Date(now.getTime() - 60_000).toISOString();
-
-      await adapter.enqueue({
-        id: "cron-completed-job",
-        queue: "cron-recovery-test",
-        type: "daily-task",
-        payload: { key: "value" },
-        maxAttempts: 1,
-        retryDelay: 0,
-        backoff: "fixed",
-        timeout: 5_000,
-        priority: 0,
-        runAt: pastRunAt,
-        cron: "*/5 * * * *",
-      });
-
-      // Claim and complete the job
-      await adapter.claim({
-        queue: "cron-recovery-test",
-        lockId: "worker-1",
-        lockDuration: 30_000,
-        now: pastRunAt,
-      });
-      await adapter.complete("cron-completed-job", "worker-1");
-
-      // Verify only 1 job exists in storage (and no next occurrence)
-      let jobs = await adapter.getJobs({ queue: "cron-recovery-test", limit: 10 });
-      expect(jobs).toHaveLength(1);
-      expect(jobs[0]!.status).toBe("completed");
-
-      const emitter = new QueueEventEmitter();
-      const worker = new Worker(
-        "cron-recovery-test",
-        adapter,
-        emitter,
-        new Map(),
-        {},
-        { pollInterval: 50 },
-        {
-          concurrency: 1,
-          attempts: 1,
-          retryDelay: 0,
-          backoff: "fixed",
-          timeout: 5_000,
-          pollInterval: 50,
-          stalledInterval: 60_000,
-          lockDuration: 30_000,
-          rateLimit: undefined,
-        },
-      );
-
-      // Run recoverCronJobs directly (set running status)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (worker as any)._status = "running";
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (worker as any).recoverCronJobs();
-
-      // Next occurrence has now been recovered and created in storage!
-      jobs = await adapter.getJobs({ queue: "cron-recovery-test", limit: 10 });
-      expect(jobs).toHaveLength(2);
-
-      const recoveredJob = jobs.find((j) => j.id !== "cron-completed-job");
-      expect(recoveredJob).toBeDefined();
-      expect(recoveredJob!.type).toBe("daily-task");
-      expect(recoveredJob!.payload).toEqual({ key: "value" });
-      expect(recoveredJob!.cron).toBe("*/5 * * * *");
-      expect(recoveredJob!.id).toContain("cron:cron-completed-job:");
-
-      // Running recoverCronJobs a second time must NOT create duplicate occurrences
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (worker as any).recoverCronJobs();
-
-      jobs = await adapter.getJobs({ queue: "cron-recovery-test", limit: 10 });
-      expect(jobs).toHaveLength(2);
-
-      await adapter.close();
-    });
+    const done = await queue.get(job.id);
+    // result stored as JSON string for Redis compat, so accept both forms
+    const result = typeof done?.result === "string"
+      ? JSON.parse(done.result as string)
+      : done?.result;
+    expect(result).toEqual({ doubled: 42 });
+    await worker.close();
   });
 });
